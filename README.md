@@ -11,9 +11,7 @@
 
 | 申请人页面 | 车主页面 |
 |:---:|:---:|
-| [🔗 在线预览](https://htmlpreview.github.io/?https://github.com/ChauncyZhaz/parking-spot/blob/main/preview-requester.html) | [🔗 在线预览](https://htmlpreview.github.io/?https://github.com/ChauncyZhaz/parking-spot/blob/main/preview-owner.html) |
-
-> 仓库推到 GitHub 后，把上面链接里的用户名 / 仓库名换成你自己的即可。
+| [🔗 在线预览](https://htmlpreview.github.io/?https://github.com/ChauncyZhaz/parkmate/blob/main/preview-requester.html) | [🔗 在线预览](https://htmlpreview.github.io/?https://github.com/ChauncyZhaz/parkmate/blob/main/preview-owner.html) |
 
 ## 三条链路
 
