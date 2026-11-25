@@ -50,6 +50,35 @@
 
 ## 部署
 
+### 一键部署（推荐，fork 后 0 代码改动）
+
+前提：有 Cloudflare 账号、装了 Node.js 18+。
+
+```bash
+git clone https://github.com/你的用户名/parkmate.git
+cd parkmate
+npm install            # 顺带装上 wrangler
+npx wrangler login     # 浏览器里授权一次
+npm run deploy         # 建 KV → 回填 id → 部署，全自动
+```
+
+`scripts/deploy.mjs` 会自动完成：
+
+1. 发现 `wrangler.toml` 里的 KV id 还是占位符；
+2. 去你账号里找同名 KV，找不到才创建（重复执行不会重复建）；
+3. 把拿到的 id 回填进 `wrangler.toml`；
+4. 执行 `wrangler deploy`，并打印你的 `*.workers.dev` 地址。
+
+全程不用改任何代码。部署完直接打开 `/poster?spot=B2-078` 打印二维码就能贴。
+
+只想看它会做什么、不真正执行：
+
+```bash
+node scripts/deploy.mjs --dry-run
+```
+
+> 唯一躲不掉的是 `wrangler login`——Cloudflare 的资源都绑在账号下，任何部署方式都得先授权一次。
+
 ### 方式一：Dashboard 点几下
 
 1. **建 KV**：Workers & Pages → KV → Create namespace，名字随便（如 `parking`）
@@ -99,7 +128,7 @@ wrangler secret put OWNER_PHONE
 ## 本地预览 / 测试
 
 ```bash
-node parking/preview.mjs
+npm run dev
 # 申请页 http://localhost:8788/?spot=B2-078
 # 车主台 http://localhost:8788/owner
 # 打印页 http://localhost:8788/poster?spot=B2-078
@@ -109,7 +138,8 @@ node parking/preview.mjs
 本地用内存 KV，重启即清空；推送只打印到控制台不会真发。
 
 ```bash
-node parking/test-local.mjs   # 64 项端到端断言，覆盖申请/同意/拒绝/延长/释放/冲突/限流/隐私
+npm test        # 等同于 node test-local.mjs
+# 64 项端到端断言，覆盖申请/同意/拒绝/延长/释放/冲突/限流/隐私
 ```
 
 ## 状态机

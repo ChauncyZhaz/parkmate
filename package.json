@@ -1,0 +1,22 @@
+{
+  "name": "parkmate",
+  "version": "1.0.0",
+  "private": true,
+  "description": "贴在车位柱子上的临时借用申请系统 · Cloudflare Workers 单文件实现",
+  "keywords": [
+    "cloudflare-workers",
+    "parking",
+    "kv",
+    "serverless"
+  ],
+  "license": "MIT",
+  "scripts": {
+    "deploy": "node scripts/deploy.mjs",
+    "dev": "node preview.mjs",
+    "test": "node test-local.mjs",
+    "kv": "wrangler kv namespace create PARKING_KV"
+  },
+  "devDependencies": {
+    "wrangler": "latest"
+  }
+}
