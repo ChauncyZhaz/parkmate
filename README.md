@@ -50,36 +50,36 @@
 
 ## 部署
 
-### 一键部署（推荐，fork 后 0 代码改动）
+三种方式任选其一。**推荐方式一**：fork 一次 + 后台关联一次，之后 push 自动部署，全程不改代码。
 
-前提：有 Cloudflare 账号、装了 Node.js 18+。
+### 方式一：Cloudflare 后台关联 Git（推荐，fork 后 0 代码改动）
+
+1. Fork 本仓库到自己账号
+2. Cloudflare Dashboard → **Workers & Pages** → **Create application** → 选 **GitHub**
+3. 授权 GitHub，选中 fork 后的 `parkmate` 仓库
+4. 构建命令留空，直接 **Save and Deploy**（会自动读取仓库里的 `wrangler.toml`）
+5. 首次部署时**自动创建 KV**（名字类似 `parkmate-PARKING_KV`）；之后每次 push 到 `main` 自动重新部署，KV 一直保持绑定、数据不丢
+
+> Worker 名称必须与 `wrangler.toml` 里的 `name`（`parkmate`）一致，否则构建会失败。
+> 通过后台部署时，KV 的 id 不会写回仓库（在 Dashboard 的 Storage & Databases → KV 里能看到），但资源会一直绑着，不用管。
+
+部署完直接访问 `/poster?spot=B2-078` 打印二维码。
+
+### 方式二：本地命令行一键部署
 
 ```bash
 git clone https://github.com/你的用户名/parkmate.git
 cd parkmate
 npm install            # 顺带装上 wrangler
 npx wrangler login     # 浏览器里授权一次
-npm run deploy         # 建 KV → 回填 id → 部署，全自动
+npm run deploy         # 自动建 KV + 部署
 ```
 
-`scripts/deploy.mjs` 会自动完成：
+脚本会优先交给 Wrangler 自动供应 KV（4.45+ 默认开启），旧版本则退化为"手动建 KV + 回填 id"，
+最后打印你的 `*.workers.dev` 地址。只想看它会做什么：`node scripts/deploy.mjs --dry-run`。
 
-1. 发现 `wrangler.toml` 里的 KV id 还是占位符；
-2. 去你账号里找同名 KV，找不到才创建（重复执行不会重复建）；
-3. 把拿到的 id 回填进 `wrangler.toml`；
-4. 执行 `wrangler deploy`，并打印你的 `*.workers.dev` 地址。
+### 方式三：纯手动粘贴（完全不碰命令行）
 
-全程不用改任何代码。部署完直接打开 `/poster?spot=B2-078` 打印二维码就能贴。
-
-只想看它会做什么、不真正执行：
-
-```bash
-node scripts/deploy.mjs --dry-run
-```
-
-> 唯一躲不掉的是 `wrangler login`——Cloudflare 的资源都绑在账号下，任何部署方式都得先授权一次。
-
-### 方式一：Dashboard 点几下
 
 1. **建 KV**：Workers & Pages → KV → Create namespace，名字随便（如 `parking`）
 2. **建 Worker**：Create Worker → 把 `worker.js` 全部内容粘进去 → Deploy
@@ -99,21 +99,6 @@ node scripts/deploy.mjs --dry-run
 > 不配也能用：申请照常记录，只是不会主动提醒你，需要自己打开 `/owner` 看。
 
 5. **对外域名**：可以直接用 `xxx.workers.dev`，也可以绑自己的域名（推荐，扫码域名短、国内访问稳）
-
-### 方式二：wrangler
-
-```bash
-npm i -g wrangler
-wrangler login
-wrangler kv namespace create PARKING_KV   # 把输出的 id 填进 wrangler.toml
-wrangler deploy
-```
-
-`wrangler.toml` 已经放在同目录，改 `id` 即可。手机号建议用 Secret：
-
-```bash
-wrangler secret put OWNER_PHONE
-```
 
 ## 打印告示
 

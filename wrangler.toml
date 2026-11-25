@@ -2,15 +2,19 @@ name = "parkmate"
 main = "worker.js"
 compatibility_date = "2024-11-01"
 
-# 先执行 wrangler kv namespace create PARKING_KV，把返回的 id 填进来
-kv_namespaces = [
-  { binding = "PARKING_KV", id = "请替换为你的 KV namespace id" }
-]
+# KV 绑定：故意不写 id。
+# Wrangler 4.45+ 会在首次部署时自动创建这个 namespace（名称以 worker 名开头，
+# 例如 parkmate-PARKING_KV），之后每次部署自动复用，数据不会丢。
+# 这样别人 fork 之后不需要填写任何账号专属的 id。
+# 如果你已有现成的 KV 想复用，就在下面追加一行：id = "你的 namespace id"
+[[kv_namespaces]]
+binding = "PARKING_KV"
 
 [vars]
 SPOT_NAME = "私家车位"
 SPOT_NOTE = "本车位为私家车位，可临时借用，请先申请并留下联系方式"
-# 手机号建议用 `wrangler secret put OWNER_PHONE` 设置，不要写在这里
+
+# 敏感变量建议用 `wrangler secret put OWNER_PHONE` 设置，或去 Cloudflare 后台配
 # OWNER_PHONE = "138xxxxxxxx"
 
 # 推送渠道（配一个就行）

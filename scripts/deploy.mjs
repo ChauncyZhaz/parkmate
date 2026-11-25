@@ -30,7 +30,6 @@ const DRY_RUN = process.argv.includes('--dry-run')
 const IS_WIN = process.platform === 'win32'
 
 const ID_RE = /^[a-f0-9]{32}$/i
-const PLACEHOLDER_RE = /(请替换|替换为|your[-_\s]?kv|todo|placeholder|xxx)/i
 
 function log(msg = '') { console.log(msg) }
 function step(msg) { console.log('\n▶ ' + msg) }
@@ -73,17 +72,35 @@ function runWrangler(args, { capture = false, allowFail = false } = {}) {
   return res
 }
 
+let WRANGLER_VERSION = null
+
 function ensureWrangler() {
-  if (DRY_RUN) return
-  const res = spawnSync(IS_WIN && /[\\/]/.test(wranglerPath()) ? '"' + wranglerPath() + '"' : wranglerPath(),
+  const bin = wranglerPath()
+  const res = spawnSync(IS_WIN && /[\\/]/.test(bin) ? '"' + bin + '"' : bin,
     ['--version'], { shell: IS_WIN, encoding: 'utf8' })
 
   if (res.status !== 0) {
+    if (DRY_RUN) {
+      log('  ! 没检测到 wrangler（dry-run 先继续）')
+      return
+    }
     fail('没找到 wrangler。先运行下面任意一条：\n'
       + '  npm install            # 用项目自带的依赖（推荐）\n'
       + '  npm install -g wrangler # 或装到全局')
   }
-  ok('wrangler ' + String(res.stdout || '').trim())
+
+  const out = String(res.stdout || '') + String(res.stderr || '')
+  const m = out.match(/(\d+)\.(\d+)\.(\d+)/)
+  if (m) WRANGLER_VERSION = { major: Number(m[1]), minor: Number(m[2]), patch: Number(m[3]) }
+  ok('wrangler ' + (m ? m[0] : out.trim()))
+}
+
+// Wrangler 4.45+ 默认开启自动资源供应：配置里省略 id 就自动创建并绑定
+function supportsAutoProvision() {
+  const v = WRANGLER_VERSION
+  if (!v) return false
+  if (v.major > 4) return true
+  return v.major === 4 && v.minor >= 45
 }
 
 /* ---------------- 读写 wrangler.toml ---------------- */
@@ -113,18 +130,33 @@ function readKvId(toml) {
 }
 
 function writeKvId(toml, id) {
+  // 1) inline 写法：{ binding = "PARKING_KV", id = "..." }
   const inlineRe = new RegExp(
     '(binding\\s*=\\s*"' + BINDING + '"\\s*,\\s*id\\s*=\\s*")[^"]*(")', 'i'
   )
   if (inlineRe.test(toml)) return toml.replace(inlineRe, '$1' + id + '$2')
 
-  // 多行格式兜底
-  const parts = toml.split(/(\[\[kv_namespaces\]\][\s\S]*?)(?=\[\[|\[[a-z]|$)/i)
-  for (let i = 0; i < parts.length; i++) {
-    if (new RegExp('binding\\s*=\\s*"' + BINDING + '"', 'i').test(parts[i]) && /id\s*=\s*"/i.test(parts[i])) {
-      parts[i] = parts[i].replace(/(id\s*=\s*")[^"]*(")/i, '$1' + id + '$2')
-      return parts.join('')
+  // 2) 多行写法：在 [[kv_namespaces]] 块里的 binding 行后补 id（已有则替换）
+  const lines = toml.split(/\r?\n/)
+  for (let i = 0; i < lines.length; i++) {
+    if (!new RegExp('^\\s*binding\\s*=\\s*"' + BINDING + '"', 'i').test(lines[i])) continue
+
+    let header = ''
+    for (let k = i - 1; k >= 0; k--) {
+      if (/^\s*\[/.test(lines[k])) { header = lines[k]; break }
     }
+    if (!/kv_namespaces/i.test(header)) continue
+
+    let j = i + 1
+    while (j < lines.length && !/^\s*\[/.test(lines[j])) {
+      if (/^\s*id\s*=/i.test(lines[j])) {
+        lines[j] = 'id = "' + id + '"'
+        return lines.join('\n')
+      }
+      j++
+    }
+    lines.splice(i + 1, 0, 'id = "' + id + '"')
+    return lines.join('\n')
   }
   return null
 }
@@ -180,11 +212,14 @@ async function main() {
 
   if (isValidId(kvId)) {
     ok('已绑定 PARKING_KV：' + kvId.slice(0, 8) + '…')
+  } else if (supportsAutoProvision()) {
+    // 首选：交给 Wrangler 自动供应（官方推荐做法，fork 后零配置）
+    ok('wrangler 支持自动供应，部署时会自动创建并绑定 KV')
+    log('  → 不需要手动建 namespace，首次部署后 Cloudflare 会记住这个绑定')
   } else {
-    if (kvId && !PLACEHOLDER_RE.test(kvId) && kvId) {
-      log('  ! wrangler.toml 里的 id 看起来不合法（' + kvId + '），继续自动处理')
-    }
-    log('  → 还没有有效的 KV id，开始自动处理')
+    // 兜底：老版本 wrangler 没有自动供应，手动建一次再回填
+    if (kvId) log('  ! wrangler.toml 里的 id 不合法（' + kvId + '），继续自动处理')
+    log('  → wrangler 版本较老，手动处理 KV 绑定')
 
     if (DRY_RUN) {
       log('  [dry-run] 会执行：wrangler kv namespace list --json（找同名 KV）')
