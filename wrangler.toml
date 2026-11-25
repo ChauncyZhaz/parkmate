@@ -1,0 +1,22 @@
+name = "parking-spot"
+main = "worker.js"
+compatibility_date = "2024-11-01"
+
+# 先执行 wrangler kv namespace create PARKING_KV，把返回的 id 填进来
+kv_namespaces = [
+  { binding = "PARKING_KV", id = "请替换为你的 KV namespace id" }
+]
+
+[vars]
+SPOT_NAME = "私家车位"
+SPOT_NOTE = "本车位为私家车位，可临时借用，请先申请并留下联系方式"
+# 手机号建议用 `wrangler secret put OWNER_PHONE` 设置，不要写在这里
+# OWNER_PHONE = "138xxxxxxxx"
+
+# 推送渠道（配一个就行）
+# BARK_URL = "https://api.day.app/你的key"
+# PUSHPLUS_TOKEN = ""
+# PUSHPLUS_TOPIC = ""
+# WXPUSHER_TOKEN = ""
+# WXPUSHER_UIDS = ""
+# WXPUSHER_TOPIC_IDS = ""
