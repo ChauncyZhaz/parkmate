@@ -319,14 +319,20 @@ check('未配置 OWNER_TOKEN 时返回 503', noConfig.status === 503, String(noC
 sandbox.OWNER_TOKEN = GOOD_TOKEN
 
 console.log('\n=== 15. 车主「我要用车」 ===')
-const noTokenBlock = await req('/api/owner/block', { method: 'POST', token: null, body: { spot: 'G7-777', minutes: 30 } })
+const noTokenBlock = await req('/api/owner/block', { method: 'POST', token: null, body: { spot: 'G7-777', action: 'setOne', start: Date.now(), until: Date.now() + 3600000 } })
 check('无凭证不能设置返回时间', noTokenBlock.status === 401, String(noTokenBlock.status))
 
-const setBlk = await req('/api/owner/block', { method: 'POST', body: { spot: 'G7-777', minutes: 45 } })
-check('设置返回时间成功', setBlk.json.success === true && Number(setBlk.json.block.until) > Date.now())
+// 一次性：5 分钟后回来，65 分钟后恢复
+const t0 = Date.now()
+const setBlk = await req('/api/owner/block', {
+  method: 'POST',
+  body: { spot: 'G7-777', action: 'setOne', start: t0 + 5 * 60000, until: t0 + 65 * 60000 },
+})
+check('设置一次性返回时间成功', setBlk.json.success === true && Number(setBlk.json.one.until) === t0 + 65 * 60000)
+check('设置后立刻进入暂停接单', !!setBlk.json.active)
 
 const getBlk = await req('/api/owner/block?spot=G7-777')
-check('能读回设置', !!getBlk.json.block && Number(getBlk.json.block.until) === Number(setBlk.json.block.until))
+check('能读回设置', !!getBlk.json.one && Number(getBlk.json.one.until) === t0 + 65 * 60000)
 
 const blockedApply = await req('/api/apply', {
   method: 'POST', ip: '8.8.8.1',
@@ -337,17 +343,62 @@ check('设置期间无法申请', blockedApply.status === 409 && blockedApply.js
 const blockedPage = await req('/?spot=G7-777')
 check('申请页提示车主返回时间',
   blockedPage.text.includes('<div class="busy-banner">') &&
-  blockedPage.text.includes('回到车位') &&
+  blockedPage.text.includes('回到车位（约') &&
   blockedPage.text.includes('class="submit" disabled'))
 
-const clearBlk = await req('/api/owner/block', { method: 'POST', body: { spot: 'G7-777', action: 'clear' } })
-check('取消返回时间成功', clearBlk.json.success === true && clearBlk.json.block === null)
+const clearOne = await req('/api/owner/block', { method: 'POST', body: { spot: 'G7-777', action: 'clearOne' } })
+check('取消一次性设置', clearOne.json.one === null && clearOne.json.active === null)
 
-const afterClear = await req('/api/apply', {
-  method: 'POST', ip: '8.8.8.2',
-  body: { spot: 'G7-777', minutes: 30, phone: '13600136002', reason: '临停' },
+// 每周规则：拿「今天」做一条 00:00~00:00 的全天规则，必然覆盖当下
+const wd = new Date(Date.now() + 8 * 3600 * 1000).getUTCDay()
+const addRule = await req('/api/owner/block', {
+  method: 'POST',
+  body: { spot: 'G7-777', action: 'addRule', rule: { days: [wd], start: '00:00', end: '00:00' } },
 })
-check('取消后可以正常申请', afterClear.status === 200 && afterClear.json.success === true, String(afterClear.status))
+check('添加每周规则成功', addRule.json.success === true && addRule.json.rules.length === 1)
+check('规则标签标为全天', /全天/.test(addRule.json.rules[0].label), addRule.json.rules[0].label)
+check('规则立即生效', !!addRule.json.active)
+
+const rulePage = await req('/?spot=G7-777')
+check('规则生效时页面提示车主在用车位',
+  rulePage.text.includes('车主正在用车位') && rulePage.text.includes('class="submit" disabled'))
+
+const ruleBlocked = await req('/api/apply', {
+  method: 'POST', ip: '8.8.8.3',
+  body: { spot: 'G7-777', minutes: 30, phone: '13600136003', reason: '临停' },
+})
+check('每周规则窗口内无法申请', ruleBlocked.status === 409 && ruleBlocked.json.blocked === true, String(ruleBlocked.status))
+
+const delRule = await req('/api/owner/block', { method: 'POST', body: { spot: 'G7-777', action: 'removeRule', index: 0 } })
+check('删除规则后恢复接单', delRule.json.rules.length === 0 && delRule.json.active === null)
+
+// 离开窗口但下一窗口很近时，限制可借时长
+const t1 = Date.now() + 45 * 60000
+const cn = new Date(t1 + 8 * 3600 * 1000)
+const hhmm = String(cn.getUTCHours()).padStart(2, '0') + ':' + String(cn.getUTCMinutes()).padStart(2, '0')
+await req('/api/owner/block', {
+  method: 'POST',
+  body: { spot: 'G7-777', action: 'addRule', rule: { days: [cn.getUTCDay()], start: hhmm, end: '00:00' } },
+})
+const tooLongApply = await req('/api/apply', {
+  method: 'POST', ip: '8.8.8.4',
+  body: { spot: 'G7-777', minutes: 60, phone: '13600136004', reason: '临停' },
+})
+check('超过车主回来时间的时长被拒', tooLongApply.status === 409 && tooLongApply.json.limited === true, String(tooLongApply.status))
+check('提示里给出最多可停分钟', Number(tooLongApply.json.maxMinutes) > 0 && Number(tooLongApply.json.maxMinutes) <= 45)
+
+const sortOk = await req('/api/apply', {
+  method: 'POST', ip: '8.8.8.5',
+  body: { spot: 'G7-777', minutes: 30, phone: '13600136005', reason: '临停' },
+})
+check('窗口前留得下就能申请', sortOk.status === 200 && sortOk.json.success === true, String(sortOk.status))
+
+await req('/api/owner/block', { method: 'POST', body: { spot: 'G7-777', action: 'clear' } })
+const afterClear = await req('/api/apply', {
+  method: 'POST', ip: '8.8.8.6',
+  body: { spot: 'G7-777', minutes: 30, phone: '13600136006', reason: '临停' },
+})
+check('清空设置后可以正常申请', afterClear.status === 200 && afterClear.json.success === true, String(afterClear.status))
 
 /* ---------------- 汇总 ---------------- */
 console.log('\n────────────────────────────')

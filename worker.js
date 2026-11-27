@@ -17,7 +17,7 @@
  *   GET  /api/owner/app?sid=        车主读取申请详情（含联系电话）
  *   GET  /api/owner/list            车主读取待处理/进行中的申请列表
  *   GET  /api/owner/block?spot=     车主读取「我要用车」状态
- *   POST /api/owner/block           设置/取消「我要用车」（minutes 或 action=clear）
+ *   POST /api/owner/block           「我要用车」：action = setOne / clearOne / addRule / removeRule / clear
  *   POST /api/owner/decision        车主同意 / 不同意
  *   POST /api/owner/reply           车主追加留言
  *
@@ -179,6 +179,18 @@ function fmtHM(ts) {
   return hh + ':' + mm
 }
 
+// 跨天时带上「明天 / 周X」，避免把明天 08:00 读成今天
+function fmtDayHM(ts) {
+  const t = Number(ts)
+  if (!t) return ''
+  const diff = Math.round((cnDayStart(t) - cnDayStart(Date.now())) / 86400000)
+  const hm = fmtHM(t)
+  if (diff === 0) return hm
+  if (diff === 1) return '明天 ' + hm
+  if (diff === -1) return '昨天 ' + hm
+  return '周' + WD_NAMES[new Date(t + 8 * 3600 * 1000).getUTCDay()] + ' ' + hm
+}
+
 function normalizePlate(raw) {
   const s = String(raw == null ? '' : raw).toUpperCase().replace(/[^\u4e00-\u9fa5A-Z0-9]/g, '')
   return s.slice(0, 10)
@@ -251,14 +263,153 @@ async function spotOccupancy(spot) {
   }
 }
 
-// 车主「我要用车」：设置一段时间不接受新申请。到点自动失效。
+/* ------------------------------------------------------------------ */
+/* 车主「我要用车」：把车位归自己的时间段挡住                            */
+/*                                                                     */
+/* pblk:{spot} = {                                                     */
+/*   one:   { start, until }        // 一次性：回来时间 / 恢复接单时间  */
+/*   rules: [{ days:[1..5], start:'17:00', end:'08:00' }]              */
+/* }                                                                   */
+/* 规则里 end <= start 表示跨夜，end === start 表示全天。                */
+/* ------------------------------------------------------------------ */
+
+const CN_OFFSET = 8 * 3600 * 1000
+const WD_NAMES = ['日', '一', '二', '三', '四', '五', '六']
+const WD_ORDER = [1, 2, 3, 4, 5, 6, 0]
+
+// 'HH:MM' → 当天第几分钟；不合法返回 null
+function parseHM(value) {
+  const m = /^([01]?\d|2[0-3]):([0-5]\d)$/.exec(String(value == null ? '' : value).trim())
+  return m ? Number(m[1]) * 60 + Number(m[2]) : null
+}
+
+function hmLabel(min) {
+  return String(Math.floor(min / 60)).padStart(2, '0') + ':' + String(min % 60).padStart(2, '0')
+}
+
+// 东八区当天 00:00 的时间戳
+function cnDayStart(ts) {
+  const d = new Date(ts + CN_OFFSET)
+  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()) - CN_OFFSET
+}
+
+function cnWeekday(ts) {
+  return new Date(ts + CN_OFFSET).getUTCDay()
+}
+
+function ruleMinutes(rule) {
+  const s = parseHM(rule && rule.start)
+  const e = parseHM(rule && rule.end)
+  if (s == null || e == null) return null
+  const dur = (e - s + 1440) % 1440
+  return { s, e, dur: dur === 0 ? 1440 : dur }
+}
+
+// 现在是否落在某条规则的窗口里（跨夜要回看前一天）
+function ruleWindow(rule, now) {
+  if (!rule || !Array.isArray(rule.days) || !rule.days.length) return null
+  const mm = ruleMinutes(rule)
+  if (!mm) return null
+  const today = cnDayStart(now)
+  for (const offset of [0, -86400000]) {
+    const day = today + offset
+    if (rule.days.indexOf(cnWeekday(day)) < 0) continue
+    const start = day + mm.s * 60000
+    const until = start + mm.dur * 60000
+    if (now >= start && now < until) return { start, until }
+  }
+  return null
+}
+
+// 严格晚于 now 的下一个窗口开始时间，用来限制「最多还能停多久」
+function nextWindowStart(rules, one, now) {
+  let best = null
+  if (one && Number(one.start) > now) best = Number(one.start)
+  const today = cnDayStart(now)
+  for (const rule of rules) {
+    const mm = ruleMinutes(rule)
+    if (!mm || !Array.isArray(rule.days)) continue
+    for (let i = 0; i <= 7; i++) {
+      const day = today + i * 86400000
+      if (rule.days.indexOf(cnWeekday(day)) < 0) continue
+      const start = day + mm.s * 60000
+      if (start > now && (best === null || start < best)) best = start
+    }
+  }
+  return best
+}
+
+function uniqDays(days) {
+  return WD_ORDER.filter(d => days.indexOf(d) >= 0)
+}
+
+// 兼容旧格式 { until }（上一版按分钟设置存下来的）
+function normalizeBlock(raw) {
+  if (!raw) return { one: null, rules: [] }
+  let one = null
+  if (raw.one && Number(raw.one.until)) {
+    one = { start: Number(raw.one.start) || 0, until: Number(raw.one.until) }
+  } else if (raw.until) {
+    one = { start: Number(raw.createdAt) || 0, until: Number(raw.until) }
+  }
+  const rules = (Array.isArray(raw.rules) ? raw.rules : [])
+    .map(r => ({
+      days: uniqDays((Array.isArray(r.days) ? r.days : []).map(Number).filter(d => d >= 0 && d <= 6)),
+      start: r.start,
+      end: r.end,
+    }))
+    .filter(r => r.days.length && ruleMinutes(r))
+  return { one, rules }
+}
+
+function blockState(raw, now) {
+  const { one, rules } = normalizeBlock(raw)
+  let active = null
+  if (one && now < one.until) active = { start: one.start || 0, until: one.until, source: 'once' }
+  for (const rule of rules) {
+    const w = ruleWindow(rule, now)
+    if (w && (!active || w.until > active.until)) active = { start: w.start, until: w.until, source: 'rule', rule }
+  }
+  return { active, next: nextWindowStart(rules, one, now), one, rules }
+}
+
+function ruleLabel(rule) {
+  const mm = ruleMinutes(rule)
+  if (!mm) return ''
+  const days = uniqDays(Array.isArray(rule.days) ? rule.days : [])
+  let dayText
+  if (days.length === 7) dayText = '每天'
+  else if (days.length === 5 && days[0] === 1 && days[4] === 5) dayText = '周一至周五'
+  else if (days.length === 2 && days[0] === 6 && days[1] === 0) dayText = '周六、周日'
+  else dayText = days.map(d => '周' + WD_NAMES[d]).join('、')
+  if (mm.dur === 1440) return dayText + ' 全天'
+  return dayText + ' ' + hmLabel(mm.s) + ' → ' + (mm.e <= mm.s ? '次日 ' : '') + hmLabel(mm.e)
+}
+
 async function readBlock(spot) {
-  const b = await readJson(K.block(spot))
-  if (!b || !b.until) return null
-  const until = Number(b.until)
-  const now = Date.now()
-  if (now >= until) return null
-  return { until, remainMin: Math.max(1, Math.round((until - now) / 60000)) }
+  let raw = null
+  try { raw = await readJson(K.block(spot)) } catch (e) { raw = null }
+  return blockState(raw, Date.now())
+}
+
+// 规则是长期设置，不设 TTL（旧的一次性窗口按时间戳自然失效）
+async function saveBlock(spot, state) {
+  await kv().put(K.block(spot), JSON.stringify({ one: state.one, rules: state.rules }))
+}
+
+function publicBlock(st, now) {
+  now = now || Date.now()
+  return {
+    one: st.one,
+    rules: st.rules.map(r => ({ days: r.days, start: r.start, end: r.end, label: ruleLabel(r) })),
+    active: st.active ? {
+      until: st.active.until,
+      source: st.active.source,
+      returnAt: st.active.start || 0,
+      remainMin: Math.max(0, Math.round((st.active.until - now) / 60000)),
+    } : null,
+    next: st.next || null,
+  }
 }
 
 // 根据 state + 时间算出对外展示的状态
@@ -851,18 +1002,21 @@ async function handleApply(request, url, event) {
     return json({ success: false, error: '请填写正确的 11 位手机号，便于车主联系你' }, 400)
   }
 
-  // 车主设置了「我要用车」：这段时间一律不接新申请
-  {
-    const blk = await readBlock(spot)
-    if (blk) {
-      return json({
-        success: false,
-        blocked: true,
-        error: '车主预计 ' + fmtHM(blk.until) + ' 回到车位，暂不接受新的借用',
-        until: blk.until,
-        remainMin: Math.max(1, Math.round((blk.until - Date.now()) / 60000)),
-      }, 409)
-    }
+  // 车主把车位划成「自己的时间段」：窗口内不接单；窗口外也要留足离场时间
+  let blk = { active: null, next: null }
+  try { blk = await readBlock(spot) } catch (e) { console.error('读取我要用车失败', msgOf(e)) }
+
+  if (blk.active) {
+    const ret = Number(blk.active.start) || 0
+    return json({
+      success: false,
+      blocked: true,
+      error: ret > Date.now()
+        ? '车主 ' + fmtDayHM(ret) + ' 回到车位，暂不接受新的借用'
+        : '车主正在用车位，暂不接受新的借用',
+      until: blk.active.until,
+      remainMin: Math.max(1, Math.round((blk.active.until - Date.now()) / 60000)),
+    }, 409)
   }
 
   // 车位正被占用时直接拒绝：不提供排队（否则一条车位会挂着多条申请，
@@ -876,6 +1030,23 @@ async function handleApply(request, url, event) {
         error: '车位正在被占用，预计 ' + fmtHM(cur.expireAt) + ' 释放',
         until: cur.expireAt,
         remainMin: Math.max(1, Math.round((Number(cur.expireAt) - Date.now()) / 60000)),
+      }, 409)
+    }
+  }
+
+  // 离车主回来的时间不够了：不让申请，免得批了又得提前赶人
+  if (blk.next) {
+    const maxMin = Math.floor((blk.next - Date.now()) / 60000)
+    if (maxMin < CONFIG.MIN_MINUTES || Date.now() + minutes * 60000 > blk.next) {
+      return json({
+        success: false,
+        blocked: true,
+        limited: true,
+        error: maxMin < CONFIG.MIN_MINUTES
+          ? '车主 ' + fmtDayHM(blk.next) + ' 就回到车位，来不及停了'
+          : '车主 ' + fmtDayHM(blk.next) + ' 回到车位，最多只能停 ' + formatMinutes(maxMin),
+        until: blk.next,
+        maxMinutes: Math.max(0, maxMin),
       }, 409)
     }
   }
@@ -1090,7 +1261,7 @@ async function handleOwnerList(request, url) {
   return json({ success: true, items: list })
 }
 
-/* API：车主「我要用车」——设一段时间不接新申请，到点自动失效 */
+/* API：车主「我要用车」——按时间段挡住车位，可一次性也可每周重复 */
 async function handleOwnerBlock(request, url) {
   let body = {}
   if (request.method === 'POST') {
@@ -1103,26 +1274,66 @@ async function handleOwnerBlock(request, url) {
   const spot = sanitizeSpot(body.spot || url.searchParams.get('spot') || '')
 
   if (request.method !== 'POST') {
-    return json({ success: true, spot, block: await readBlock(spot) })
+    const st = await readBlock(spot)
+    return json({ success: true, spot, ...publicBlock(st) })
   }
 
-  if (body.action === 'clear') {
+  const raw = await readJson(K.block(spot))
+  const state = normalizeBlock(raw)
+  const action = String(body.action || '')
+
+  const done = async () => json({ success: true, spot, ...publicBlock(blockState(state, Date.now())) })
+
+  if (action === 'clear') {
     await kv().delete(K.block(spot))
-    return json({ success: true, spot, block: null })
+    return json({ success: true, spot, one: null, rules: [], active: null, next: null })
   }
 
-  const minutes = Math.round(Number(body.minutes))
-  if (!Number.isFinite(minutes) || minutes < CONFIG.BLOCK_MIN_MINUTES || minutes > CONFIG.BLOCK_MAX_MINUTES) {
-    return json({
-      success: false,
-      error: '返回时间请选 ' + CONFIG.BLOCK_MIN_MINUTES + ' 分钟到 ' + formatMinutes(CONFIG.BLOCK_MAX_MINUTES),
-    }, 400)
+  if (action === 'clearOne') {
+    state.one = null
+    await saveBlock(spot, state)
+    return done()
   }
 
-  const until = Date.now() + minutes * 60000
-  // 多留 60 秒，避免「正好到点」时 key 先过期、页面还显示占用
-  await writeJson(K.block(spot), { until, createdAt: Date.now() }, minutes * 60 + 60)
-  return json({ success: true, spot, block: { until } })
+  if (action === 'setOne') {
+    const until = Math.round(Number(body.until))
+    const start = Math.round(Number(body.start)) || 0
+    if (!Number.isFinite(until) || until <= Date.now()) {
+      return json({ success: false, error: '恢复接单时间必须晚于现在' }, 400)
+    }
+    if (until - Date.now() > 7 * 86400000) {
+      return json({ success: false, error: '一次性设置最长 7 天，长期规律请用每周规则' }, 400)
+    }
+    if (start && start > until) {
+      return json({ success: false, error: '回来时间不能晚于恢复接单时间' }, 400)
+    }
+    state.one = { start, until }
+    await saveBlock(spot, state)
+    return done()
+  }
+
+  if (action === 'addRule') {
+    const rule = body.rule || {}
+    const mm = ruleMinutes(rule)
+    const days = uniqDays((Array.isArray(rule.days) ? rule.days : []).map(Number).filter(d => d >= 0 && d <= 6))
+    if (!mm || !days.length) return json({ success: false, error: '请选择星期和回来/恢复时间' }, 400)
+    if (state.rules.length >= 6) return json({ success: false, error: '每周规则最多 6 条' }, 400)
+    state.rules.push({ days, start: hmLabel(mm.s), end: hmLabel(mm.e) })
+    await saveBlock(spot, state)
+    return done()
+  }
+
+  if (action === 'removeRule') {
+    const i = Math.round(Number(body.index))
+    if (!Number.isFinite(i) || i < 0 || i >= state.rules.length) {
+      return json({ success: false, error: '规则不存在' }, 400)
+    }
+    state.rules.splice(i, 1)
+    await saveBlock(spot, state)
+    return done()
+  }
+
+  return json({ success: false, error: '未知操作' }, 400)
 }
 
 async function handleOwnerDecision(request, url) {
@@ -1263,32 +1474,52 @@ async function renderApplyPage(url) {
   // 顶部大字：优先 URL 里的车位号，其次配置的车位名首段（避免把「私家车位」重复放大）
   const spotNo = spot || (name && name !== '私家车位' ? name.split(/[\s·]+/)[0] : '')
 
-  // 扫码就能看到车位现在有没有人占 / 车主是不是马上回来，别让人填完整张表才被 409 顶回来
+  // 扫码就能看到车位现在归谁用，别让人填完整张表才被 409 顶回来
   let occ = null
-  let blk = null
+  let blk = { active: null, next: null }
   try {
     occ = await spotOccupancy(spot)
     blk = await readBlock(spot)
   } catch (e) { console.error('车位状态读取失败', msgOf(e)) }
 
-  // 不能申请的原因：正在被占优先于「车主快回来了」
-  const pause = occ ? 'occupied' : (blk ? 'blocked' : '')
+  const block = blk.active
+  const returnAt = block ? Number(block.start) || 0 : 0
+  const returnSoon = returnAt > Date.now()
+  // 不在占用窗口里，但离下一个窗口很近：限一下最长可借时长
+  const limitMin = (!block && blk.next)
+    ? Math.max(0, Math.floor((blk.next - Date.now()) / 60000))
+    : 0
+  // 只剩几分钟，连最短申请都塞不下，直接当不可申请
+  const tooLate = !block && limitMin > 0 && limitMin < CONFIG.MIN_MINUTES
+  const pause = occ ? 'occupied' : ((block || tooLate) ? 'blocked' : '')
+  const limitAt = (!tooLate && limitMin && limitMin < CONFIG.MAX_MINUTES) ? fmtDayHM(blk.next) : ''
+  const pauseLabel = pause === 'occupied'
+    ? '车位使用中 · 暂不可申请'
+    : (pause === 'blocked'
+      ? ((block && !returnSoon) ? '车主在用车位 · 暂不可申请' : '车主即将回来 · 暂不可申请')
+      : '发送借用申请')
 
   const badge = occ
     ? '<span class="live busy"><i></i>使用中 · ' + fmtHM(occ.expireAt) + ' 释放</span>'
-    : (blk
-      ? '<span class="live busy"><i></i>车主 ' + fmtHM(blk.until) + ' 回来</span>'
-      : '<span class="live"><i></i>可临时借用</span>')
+    : (block
+      ? '<span class="live busy"><i></i>' + (returnSoon ? '车主 ' + fmtHM(returnAt) + ' 回来' : '车主在用车位') + '</span>'
+      : (tooLate
+        ? '<span class="live busy"><i></i>车主 ' + fmtHM(blk.next) + ' 回来</span>'
+        : '<span class="live"><i></i>可临时借用</span>'))
 
   const busyBanner = occ ? `
           <div class="busy-banner">
             <div class="t">车位正在使用中</div>
-            <div class="d">预计 <b>${fmtHM(occ.expireAt)}</b> 释放，还剩约 ${formatMinutes(occ.remainMin)}。${blk ? '车主预计 <b>' + fmtHM(blk.until) + '</b> 回来。' : ''}车位空出来之后才能提交申请，晚点再来试试。</div>
-          </div>` : (blk ? `
+            <div class="d">预计 <b>${fmtHM(occ.expireAt)}</b> 释放，还剩约 ${formatMinutes(occ.remainMin)}。${block ? (returnSoon ? '车主预计 <b>' + fmtDayHM(returnAt) + '</b> 回来。' : '车主在用车位，<b>' + fmtDayHM(block.until) + '</b> 之后恢复接单。') : ''}车位空出来之后才能提交申请，晚点再来试试。</div>
+          </div>` : (block ? `
           <div class="busy-banner">
-            <div class="t">车主马上要回来了</div>
-            <div class="d">预计 <b>${fmtHM(blk.until)}</b> 回到车位，约 ${formatMinutes(blk.remainMin)}后。这段时间不接受新的临时停靠，等车主把车停好之后再扫码吧。</div>
-          </div>` : '')
+            <div class="t">${returnSoon ? '车主马上要回来了' : '车主正在用车位'}</div>
+            <div class="d">${returnSoon ? '预计 <b>' + fmtDayHM(returnAt) + '</b> 回到车位（约 ' + formatMinutes(Math.max(1, Math.round((returnAt - Date.now()) / 60000))) + '后）。' : ''}这段时间不接受新的临时停靠，<b>${fmtDayHM(block.until)}</b> 之后恢复接单。</div>
+          </div>` : (tooLate ? `
+          <div class="busy-banner">
+            <div class="t">车主马上就要用车了</div>
+            <div class="d">车主 <b>${fmtDayHM(blk.next)}</b> 回到车位，只剩 ${formatMinutes(limitMin)}，来不及停了。等车主停好车之后再来吧。</div>
+          </div>` : ''))
 
   const page = `
   <!DOCTYPE html>
@@ -1474,6 +1705,12 @@ async function renderApplyPage(url) {
       .occupy-tip b { font-weight: 700; }
       .occupy-tip button { width: 100%; margin-top: 8px; min-height: 34px; border: 1px solid #fbbf24; background: #fff; color: #92400e; border-radius: 9px; font-family: inherit; font-size: 12px; font-weight: 700; cursor: pointer; }
       .occupy-tip .hint { margin-top: 3px; font-size: 11px; color: #a16207; }
+      .limit-note {
+        margin-top: 10px; padding: 8px 11px; border-radius: 10px;
+        background: #f0fdfa; border: 1px solid #99f6e4; color: #0f766e;
+        font-size: 11.5px; line-height: 1.55;
+      }
+      .limit-note b { font-variant-numeric: tabular-nums; }
 
       .submit {
         width: 100%; height: 48px; margin-top: 12px;
@@ -1646,8 +1883,8 @@ ${busyBanner}
             <div class="hint" id="occupyHint">等车位空出来再提交就好。</div>
             <button type="button" onclick="location.reload()">刷新看看</button>
           </div>
-
-          <button id="submitBtn" class="submit"${pause ? ' disabled' : ''} onclick="submitApply()"><span>${pause === 'blocked' ? '车主即将回来 · 暂不可申请' : (pause === 'occupied' ? '车位使用中 · 暂不可申请' : '发送借用申请')}</span></button>
+${limitAt ? '          <div class="limit-note">车主 <b>' + limitAt + '</b> 回到车位，最多还能停 ' + formatMinutes(Math.max(1, limitMin)) + '</div>' : ''}
+          <button id="submitBtn" class="submit"${pause ? ' disabled' : ''} onclick="submitApply()"><span>${pauseLabel}</span></button>
         </div>
       </div>
 
@@ -1688,6 +1925,9 @@ ${busyBanner}
       // 'occupied' | 'blocked' | ''：服务端渲染时带上，提交时若发现状态变了也会翻过来
       var pauseKind = ${JSON.stringify(pause)};
       var busy = !!pauseKind;
+      // 距下一个「车主自用」窗口还有多少分钟，0 表示不限
+      var limitMin = ${limitMin || 0};
+      var limitAt = ${JSON.stringify(limitAt || '')};
       var SID = '';
       var currentStatus = 'pending';
       var serverSkew = 0;
@@ -1837,6 +2077,10 @@ ${busyBanner}
 
         if (!minutes || minutes < 15) { toast('请选择或填写占用时长'); return; }
         if (minutes > 480) { toast('单次最长 8 小时'); return; }
+        if (limitMin && minutes > limitMin) {
+          toast('车主 ' + limitAt + ' 回到车位，最多还能停 ' + limitMin + ' 分钟');
+          return;
+        }
         if (!reason) {
           var on = document.querySelector('#reasonChips .chip.on');
           reason = on ? on.textContent.replace(/^[^\\u4e00-\\u9fa5]+/, '') : '临时停一下';
@@ -1863,6 +2107,11 @@ ${busyBanner}
             })
           });
           var data = await res.json().catch(function () { return {}; });
+
+          if (res.status === 409 && data.limited) {
+            toast(data.error || '时间不够了');
+            return;
+          }
 
           if (res.status === 409 && (data.occupied || data.blocked)) {
             // 填表期间状态变了（刚被占 / 车主刚设了返回时间）：直接锁掉提交
@@ -2303,8 +2552,40 @@ function renderOwnerPage() {
       .bk-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
       .bk-t { font-size: clamp(14px, 3.8vw, 15.5px); font-weight: 800; color: var(--ink); }
       .bk-s { font-size: 11.5px; color: #94a3b8; }
-      .block-card .chips { margin-top: 10px; }
-      .block-card .chip { min-height: 36px; }
+      .bk-sec { margin-top: 12px; }
+      .bk-sec + .bk-sec { border-top: 1px dashed #eef2f7; padding-top: 12px; }
+      .bk-k { font-size: 11px; font-weight: 700; color: #94a3b8; letter-spacing: .04em; }
+      .bk-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+      .bk-ti { display: flex; align-items: center; gap: 5px; font-size: 12px; color: #475569; }
+      .bk-ti input {
+        width: 86px; height: 34px; border: 1.5px solid #dfe7f3; border-radius: 9px;
+        padding: 0 8px; font-family: inherit; font-size: 13px; color: #1e293b; background: #f8fafc;
+      }
+      .bk-btn {
+        margin-left: auto; height: 34px; padding: 0 14px; border: none; border-radius: 9px;
+        background: var(--teal); color: #fff; font-family: inherit; font-size: 12.5px; font-weight: 700;
+      }
+      .bk-days { display: flex; gap: 6px; margin-top: 8px; }
+      .bk-days button {
+        flex: 1; height: 32px; border: 1.5px solid #dfe7f3; background: #f8fafc; color: #64748b;
+        border-radius: 9px; font-family: inherit; font-size: 12px; font-weight: 700;
+      }
+      .bk-days button.on { border-color: var(--teal); background: #ccfbf1; color: #115e59; }
+      .bk-presets { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+      .bk-presets button {
+        height: 30px; padding: 0 11px; border: 1px dashed #cbd5e1; background: #fff;
+        color: #475569; border-radius: 8px; font-family: inherit; font-size: 11.5px; font-weight: 600;
+      }
+      .bk-rule {
+        display: flex; align-items: center; gap: 8px; margin-top: 8px; padding: 8px 10px;
+        background: #f8fafc; border: 1px solid #eef2f7; border-radius: 9px;
+        font-size: 12px; color: #334155;
+      }
+      .bk-rule span { flex: 1; }
+      .bk-rule button {
+        border: none; background: none; color: #94a3b8; font-family: inherit;
+        font-size: 12px; padding: 2px 4px; cursor: pointer;
+      }
       .bk-now {
         margin-top: 10px; display: flex; align-items: center; justify-content: space-between; gap: 10px;
         background: #fffbeb; border: 1px solid #fde68a; color: #92400e;
@@ -2368,17 +2649,43 @@ function renderOwnerPage() {
         <div class="block-card">
           <div class="bk-head">
             <span class="bk-t">我要用车</span>
-            <span class="bk-s" id="bkState">设置后暂停接受申请</span>
+            <span class="bk-s" id="bkState">车位</span>
           </div>
-          <div class="chips">
-            <button type="button" class="chip" onclick="setBlock(30)">30 分钟</button>
-            <button type="button" class="chip" onclick="setBlock(60)">1 小时</button>
-            <button type="button" class="chip" onclick="setBlock(120)">2 小时</button>
-            <button type="button" class="chip" onclick="setBlock(240)">4 小时</button>
+
+          <div class="bk-sec">
+            <div class="bk-k">临时一次</div>
+            <div class="bk-row">
+              <label class="bk-ti">回来<input type="time" id="bkReturn" value="18:00"></label>
+              <label class="bk-ti">恢复<input type="time" id="bkRestore" value="08:00"></label>
+              <button type="button" class="bk-btn" onclick="setOnce()">设置</button>
+            </div>
+            <div class="bk-now" id="bkNow" style="display:none">
+              <span id="bkNowText"></span>
+              <button type="button" onclick="clearOne()">取消</button>
+            </div>
           </div>
-          <div class="bk-now" id="bkNow" style="display:none">
-            <span id="bkNowText"></span>
-            <button type="button" onclick="clearBlock()">取消</button>
+
+          <div class="bk-sec">
+            <div class="bk-k">每周固定</div>
+            <div class="bk-days" id="bkDays">
+              <button type="button" data-d="1" onclick="this.classList.toggle('on')">一</button>
+              <button type="button" data-d="2" onclick="this.classList.toggle('on')">二</button>
+              <button type="button" data-d="3" onclick="this.classList.toggle('on')">三</button>
+              <button type="button" data-d="4" onclick="this.classList.toggle('on')">四</button>
+              <button type="button" data-d="5" onclick="this.classList.toggle('on')">五</button>
+              <button type="button" data-d="6" onclick="this.classList.toggle('on')">六</button>
+              <button type="button" data-d="0" onclick="this.classList.toggle('on')">日</button>
+            </div>
+            <div class="bk-row">
+              <label class="bk-ti">回来<input type="time" id="bkRuleStart" value="17:00"></label>
+              <label class="bk-ti">恢复<input type="time" id="bkRuleEnd" value="08:00"></label>
+              <button type="button" class="bk-btn" onclick="addRule()">添加</button>
+            </div>
+            <div class="bk-presets">
+              <button type="button" onclick="addRuleWith([1,2,3,4,5],'17:00','08:00')">工作日 17:00</button>
+              <button type="button" onclick="addRuleWith([6,0],'00:00','00:00')">周末全天</button>
+            </div>
+            <div id="bkRules"></div>
           </div>
         </div>
         <div class="list-head">
@@ -2579,71 +2886,122 @@ function renderOwnerPage() {
         }
       }
 
-      // 车主「我要用车」：设置后这段时间不接新申请，到点自动恢复
+      // 车主「我要用车」：把车位划成自己的时间段（一次性 + 每周重复）
       async function loadBlock() {
-        if (!BLOCK_SPOT) { renderBlock(null); return; }
+        if (!BLOCK_SPOT) { BLOCK = null; renderBlock(); return; }
         try {
           var res = await apiFetch('/api/owner/block?spot=' + encodeURIComponent(BLOCK_SPOT));
           var data = await res.json();
           if (authFailed(res, data)) return;
-          BLOCK = data.block || null;
+          BLOCK = data;
         } catch (e) { BLOCK = null; }
-        renderBlock(BLOCK);
+        renderBlock();
       }
 
-      function renderBlock(b) {
-        var now = document.getElementById('bkNow');
+      function fmtDay(ts) {
+        var base = new Date(); base.setHours(0, 0, 0, 0);
+        var d = new Date(Number(ts)); d.setHours(0, 0, 0, 0);
+        var diff = Math.round((d.getTime() - base.getTime()) / 86400000);
+        if (diff === 0) return '今天';
+        if (diff === 1) return '明天';
+        return '周' + '日一二三四五六'[new Date(Number(ts)).getDay()];
+      }
+
+      function renderBlock() {
         var state = document.getElementById('bkState');
-        if (b) {
-          now.style.display = 'flex';
-          document.getElementById('bkNowText').textContent = '预计 ' + fmtClock(b.until) + ' 回来 · 暂停接单';
-          state.textContent = '车位 ' + (BLOCK_SPOT || '默认');
+        var nowBox = document.getElementById('bkNow');
+        var one = BLOCK && BLOCK.one;
+        var live = one && Number(one.until) > Date.now();
+
+        if (live) {
+          nowBox.style.display = 'flex';
+          document.getElementById('bkNowText').textContent =
+            (one.start ? fmtDay(one.start) + ' ' + fmtClock(one.start) + ' 回来 · ' : '') +
+            fmtDay(one.until) + ' ' + fmtClock(one.until) + ' 恢复接单';
         } else {
-          now.style.display = 'none';
-          state.textContent = BLOCK_SPOT
-            ? ('车位 ' + BLOCK_SPOT + ' · 现在可以接单')
-            : '多车位用 /owner?spot=车位号';
+          nowBox.style.display = 'none';
         }
+
+        state.textContent = '车位 ' + (BLOCK_SPOT || '—') + (BLOCK && BLOCK.active ? ' · 暂停接单中' : '');
+
+        var box = document.getElementById('bkRules');
+        box.innerHTML = '';
+        var rules = (BLOCK && BLOCK.rules) ? BLOCK.rules : [];
+        if (!rules.length) {
+          var empty = document.createElement('div');
+          empty.className = 'bk-k';
+          empty.style.marginTop = '8px';
+          empty.textContent = '还没有每周规则';
+          box.appendChild(empty);
+          return;
+        }
+        rules.forEach(function (r, i) {
+          var row = document.createElement('div');
+          row.className = 'bk-rule';
+          var text = document.createElement('span');
+          text.textContent = r.label || '';
+          var del = document.createElement('button');
+          del.type = 'button';
+          del.textContent = '删除';
+          del.onclick = function () { postBlock({ action: 'removeRule', index: i }); };
+          row.appendChild(text);
+          row.appendChild(del);
+          box.appendChild(row);
+        });
       }
 
-      async function setBlock(min) {
-        if (!BLOCK_SPOT) { toast('先指定车位：/owner?spot=B2-078'); return; }
+      async function postBlock(payload) {
+        if (!BLOCK_SPOT) { toast('先指定车位：/owner?spot=B2-078'); return null; }
         try {
           var res = await apiFetch('/api/owner/block', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ spot: BLOCK_SPOT, minutes: min })
+            body: JSON.stringify(Object.assign({ spot: BLOCK_SPOT }, payload))
           });
           var data = await res.json();
-          if (authFailed(res, data)) return;
-          if (data.success) {
-            BLOCK = data.block;
-            renderBlock(BLOCK);
-            toast('已暂停接单，' + fmtClock(data.block.until) + ' 回车位');
-          } else {
-            toast(data.error || '设置失败');
-          }
-        } catch (e) { toast('网络异常'); }
+          if (authFailed(res, data)) return null;
+          if (!data.success) { toast(data.error || '操作失败'); return null; }
+          BLOCK = data;
+          renderBlock();
+          return data;
+        } catch (e) { toast('网络异常'); return null; }
       }
 
-      async function clearBlock() {
-        if (!BLOCK_SPOT) return;
-        try {
-          var res = await apiFetch('/api/owner/block', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ spot: BLOCK_SPOT, action: 'clear' })
-          });
-          var data = await res.json();
-          if (authFailed(res, data)) return;
-          if (data.success) {
-            BLOCK = null;
-            renderBlock(null);
-            toast('已取消，恢复正常接单');
-          } else {
-            toast(data.error || '取消失败');
-          }
-        } catch (e) { toast('网络异常'); }
+      // 把 HH:MM 解释成「从 fromTs 起最近的一次」
+      function atTime(hm, fromTs) {
+        var p = String(hm || '').split(':');
+        var d = new Date(fromTs);
+        d.setHours(Number(p[0]) || 0, Number(p[1]) || 0, 0, 0);
+        var ts = d.getTime();
+        if (ts <= fromTs) ts += 86400000;
+        return ts;
+      }
+
+      async function setOnce() {
+        var now = Date.now();
+        var ret = atTime(document.getElementById('bkReturn').value, now);
+        var until = atTime(document.getElementById('bkRestore').value, ret);
+        var data = await postBlock({ action: 'setOne', start: ret, until: until });
+        if (data) toast('已设置：' + fmtDay(ret) + ' ' + fmtClock(ret) + ' 回来');
+      }
+
+      function clearOne() { postBlock({ action: 'clearOne' }); }
+
+      function selectedDays() {
+        var out = [];
+        document.querySelectorAll('#bkDays button.on').forEach(function (b) { out.push(Number(b.dataset.d)); });
+        return out;
+      }
+
+      async function addRuleWith(days, start, end) {
+        var data = await postBlock({ action: 'addRule', rule: { days: days, start: start, end: end } });
+        if (data) toast('已添加每周规则');
+      }
+
+      function addRule() {
+        var days = selectedDays();
+        if (!days.length) { toast('先选星期'); return; }
+        addRuleWith(days, document.getElementById('bkRuleStart').value, document.getElementById('bkRuleEnd').value);
       }
 
       async function loadDetail() {
