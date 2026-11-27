@@ -36,6 +36,8 @@ const sandbox = {
   PARKING_KV: new MemoryKV(),
   SPOT_NAME: process.env.SPOT_NAME || '私家车位',
   OWNER_PHONE: process.env.OWNER_PHONE || '13800138000',
+  // 本地固定凭证，方便直接打开 /owner?k=... 预览；线上请用 wrangler secret put OWNER_TOKEN
+  OWNER_TOKEN: process.env.OWNER_TOKEN || 'local-preview-token',
   BARK_URL: process.env.BARK_URL || 'https://api.day.app/local-preview',
 }
 vm.createContext(sandbox)
@@ -69,10 +71,12 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, () => {
   const nets = os.networkInterfaces()
   const lan = Object.values(nets).flat().filter(n => n && n.family === 'IPv4' && !n.internal).map(n => n.address)
+  const k = encodeURIComponent(sandbox.OWNER_TOKEN)
   console.log('\n  本地预览已启动')
   console.log('  申请页   http://localhost:' + PORT + '/?spot=B2-078')
-  console.log('  车主台   http://localhost:' + PORT + '/owner')
+  console.log('  车主台   http://localhost:' + PORT + '/owner?k=' + k)
   console.log('  打印页   http://localhost:' + PORT + '/poster?spot=B2-078')
   if (lan.length) console.log('  手机同网段可访问  http://' + lan[0] + ':' + PORT + '/')
-  console.log('\n  数据存在内存里，重启即清空；推送只打印不真发。\n')
+  console.log('\n  数据存在内存里，重启即清空；推送只打印不真发。')
+  console.log('  车主台必须带 ?k=' + sandbox.OWNER_TOKEN + '（或设 OWNER_TOKEN 环境变量覆盖）\n')
 })

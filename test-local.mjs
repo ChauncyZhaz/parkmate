@@ -42,6 +42,7 @@ const sandbox = {
   setTimeout, clearTimeout, setInterval, clearInterval,
   PARKING_KV: new FakeKV(),
   BARK_URL: 'https://api.day.app/testtoken',
+  OWNER_TOKEN: 'test-owner-token-123',
 }
 vm.createContext(sandbox)
 vm.runInContext(workerSrc, sandbox, { filename: 'worker.js' })
@@ -55,9 +56,14 @@ function check(name, cond, extra) {
 }
 function ctx() { return { request: null, waitUntil: () => {} } }
 
-async function req(pathname, { method = 'GET', body, ip = '1.1.1.1' } = {}) {
+// token: 不传 = 车主接口自动带正确凭证（保持既有用例可读）；null = 故意不带；其他字符串 = 用这个值
+const GOOD_TOKEN = 'test-owner-token-123'
+async function req(pathname, { method = 'GET', body, ip = '1.1.1.1', token = undefined } = {}) {
   const url = 'https://park.example.com' + pathname
   const init = { method, headers: { 'CF-Connecting-IP': ip } }
+  const needAuth = pathname.indexOf('/api/owner') === 0 || (body && body.by === 'owner')
+  const useToken = token === undefined ? (needAuth ? GOOD_TOKEN : '') : token
+  if (useToken) init.headers['X-Owner-Token'] = useToken
   if (body !== undefined) {
     init.body = JSON.stringify(body)
     init.headers['Content-Type'] = 'application/json'
@@ -262,6 +268,47 @@ console.log('\n=== 13. 推送内容 ===')
 const barkCall = pushed.find(p => p.url.includes('api.day.app'))
 check('Bark 请求带上车主链接', barkCall && decodeURIComponent(barkCall.url).includes('/owner?sid='))
 check('推送内容含时长与原因', barkCall && decodeURIComponent(barkCall.url).includes('2 小时'))
+
+console.log('\n=== 14. 车主凭证 ===')
+check('推送链接带上车主凭证', decodeURIComponent(barkCall.url).includes('&k=' + GOOD_TOKEN))
+
+const noTokenList = await req('/api/owner/list', { token: null })
+check('列表接口不带凭证返回 401', noTokenList.status === 401, String(noTokenList.status))
+const wrongTokenApp = await req('/api/owner/app?sid=' + sid, { token: 'wrong-token-000' })
+check('详情接口错凭证返回 401', wrongTokenApp.status === 401, String(wrongTokenApp.status))
+
+const noTokenDecision = await req('/api/owner/decision', {
+  method: 'POST', token: null,
+  body: { sid: sid2, action: 'approve', minutes: 60 },
+})
+check('无凭证不能替车主同意', noTokenDecision.status === 401, String(noTokenDecision.status))
+const untouched = await req('/api/status?sid=' + sid2)
+check('越权请求没有改动状态', untouched.json.status === 'declined', untouched.json.status)
+
+const noTokenReply = await req('/api/owner/reply', {
+  method: 'POST', token: null,
+  body: { sid: sid2, text: '加我微信转账 20 元' },
+})
+check('无凭证不能冒充车主留言', noTokenReply.status === 401, String(noTokenReply.status))
+const noFakeMsg = await req('/api/status?sid=' + sid2)
+check('留言没有被写进会话', !noFakeMsg.json.messages.some(m => m.text.includes('转账')))
+
+const noTokenOwnerEnd = await req('/api/release', {
+  method: 'POST', token: null,
+  body: { sid: afterOccupy.json.sid, by: 'owner' },
+})
+check('无凭证不能以车主身份结束占用', noTokenOwnerEnd.status === 401, String(noTokenOwnerEnd.status))
+const visitorEnd = await req('/api/release', { method: 'POST', body: { sid: afterOccupy.json.sid, by: 'visitor' } })
+check('访客自己释放不受影响', visitorEnd.json.success === true, String(visitorEnd.status))
+
+const withTokenList = await req('/api/owner/list')
+check('带正确凭证可读列表', withTokenList.json.success === true && Array.isArray(withTokenList.json.items))
+
+// 未配置凭证时必须 fail closed，而不是悄悄放行
+delete sandbox.OWNER_TOKEN
+const noConfig = await req('/api/owner/list')
+check('未配置 OWNER_TOKEN 时返回 503', noConfig.status === 503, String(noConfig.status))
+sandbox.OWNER_TOKEN = GOOD_TOKEN
 
 /* ---------------- 汇总 ---------------- */
 console.log('\n────────────────────────────')

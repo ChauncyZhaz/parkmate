@@ -17,6 +17,10 @@ SPOT_NOTE = "本车位为私家车位，可临时借用，请先申请并留下�
 # 敏感变量建议用 `wrangler secret put OWNER_PHONE` 设置，或去 Cloudflare 后台配
 # OWNER_PHONE = "138xxxxxxxx"
 
+# 车主台凭证：必填，至少 8 位。不配的话 /owner 和所有 /api/owner/* 会返回 503。
+# 用 `wrangler secret put OWNER_TOKEN` 设置（不要写在这个文件里提交到仓库）
+# OWNER_TOKEN = ""
+
 # 推送渠道（配一个就行）
 # BARK_URL = "https://api.day.app/你的key"
 # PUSHPLUS_TOKEN = ""

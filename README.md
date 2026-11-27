@@ -52,6 +52,8 @@
 
 三种方式任选其一。**推荐方式一**：fork 一次 + 后台关联一次，之后 push 自动部署，全程不改代码。
 
+> ⚠️ 不管用哪种方式，部署完先配 `OWNER_TOKEN`（见下面「车主凭证」）。没配的话 `/owner` 和所有 `/api/owner/*` 会返回 503——这是故意的，不是故障。
+
 ### 方式一：Cloudflare 后台关联 Git（推荐，fork 后 0 代码改动）
 
 1. Fork 本仓库到自己账号
@@ -88,6 +90,7 @@ npm run deploy         # 自动建 KV + 部署
 
 | 变量 | 说明 |
 | --- | --- |
+| `OWNER_TOKEN` | **必填**。车主台凭证，至少 8 位，建议加为 Secret（`wrangler secret put OWNER_TOKEN`） |
 | `SPOT_NAME` | 默认车位名，如 `B2-078 私家车位` |
 | `SPOT_NOTE` | 访客看到的一句说明 |
 | `OWNER_PHONE` | 你的手机号，仅用于"联系车主"按钮（建议加为 Secret） |
@@ -99,6 +102,17 @@ npm run deploy         # 自动建 KV + 部署
 > 不配也能用：申请照常记录，只是不会主动提醒你，需要自己打开 `/owner` 看。
 
 5. **对外域名**：可以直接用 `xxx.workers.dev`，也可以绑自己的域名（推荐，扫码域名短、国内访问稳）
+
+## 车主凭证（OWNER_TOKEN）
+
+车主台不是公开页面。`/api/owner/list`、`/api/owner/app`、`/api/owner/decision`、`/api/owner/reply`，以及以车主身份结束占用，全部要凭证。
+
+为什么非要这个：`/api/owner/list` 会把进行中申请的 `sid` 列出来，顺着 `sid` 就能读到明文手机号，还能替车主点同意、替车主回话。`sid` 本身猜不到（UUID），但列表接口会主动把它交出去——不设凭证等于把车主台敞开。
+
+- **配置**：`wrangler secret put OWNER_TOKEN`，随便一串 ≥ 8 位（别用手机号/生日）。本地 `npm run dev` 默认是 `local-preview-token`。
+- **链接形态**：推送里是 `/owner?sid=xxx&k=你的token`，点开就带上了；页面会把 `k` 存在本标签页，之后在车主台里跳转不用再带。
+- **换凭证**：再执行一次 `secret put`，旧链接立刻失效，从最新一条推送重新进。
+- **没配凭证**：车主接口返回 503 并提示怎么配，**不会**退化成"谁都能看"。
 
 ## 打印告示
 
@@ -115,7 +129,7 @@ npm run deploy         # 自动建 KV + 部署
 ```bash
 npm run dev
 # 申请页 http://localhost:8788/?spot=B2-078
-# 车主台 http://localhost:8788/owner
+# 车主台 http://localhost:8788/owner?k=local-preview-token
 # 打印页 http://localhost:8788/poster?spot=B2-078
 # 手机同网段访问 http://<你的内网IP>:8788
 ```
@@ -124,7 +138,7 @@ npm run dev
 
 ```bash
 npm test        # 等同于 node test-local.mjs
-# 64 项端到端断言，覆盖申请/同意/拒绝/延长/释放/冲突/限流/隐私
+# 75 项端到端断言，覆盖申请/同意/拒绝/延长/释放/冲突/限流/隐私/车主凭证
 ```
 
 ## 状态机
@@ -142,5 +156,5 @@ pending ──同意──> approved ──到点未走──> overdue ──驶
 
 - **QR 扫不出来**：确认海报里二维码是黑白的、有 4 格白边（已内置），打印不要缩放到模糊；如果域名太长（>200 字节）会生成失败，用短域名。
 - **收不到推送**：先看 Worker 日志（`wrangler tail`），Bark 检查 key、PushPlus 检查 token 是否过期、WxPusher 检查 uid 是否订阅。
-- **隐私**：KV 里存了访客手机号，4 小时后随 TTL 自动删除；车主链接请勿外传，谁拿到 `sid` 谁就能看到号码。
+- **隐私**：KV 里存了访客手机号，4 小时后随 TTL 自动删除。车主链接里的 `k` 等于钥匙，别转发、别截图；外泄了就重新 `secret put` 换一个。访客自己的链接只有 `sid`，读不到手机号。
 - **不做的事**：不收款、不锁车位、不接道闸，就是个"打招呼"的通道。

@@ -8,7 +8,7 @@
  * 路由：
  *   GET  /                          申请人页面（扫码进入，可带 ?spot=A-012 区分车位）
  *   GET  /owner                     车主控制台（不带 sid 时列出待处理申请）
- *   GET  /owner?sid=xxx             车主处理单条申请
+ *   GET  /owner?sid=xxx&k=xxx       车主处理单条申请（k 为车主凭证）
  *   GET  /poster?spot=A-012         可直接打印的告示页（含二维码）
  *   POST /api/apply                 提交借用申请
  *   GET  /api/status?sid=           申请人轮询状态（不返回手机号）
@@ -25,6 +25,7 @@
  *   SPOT_NAME        车位名称/编号，默认「私家车位」
  *   SPOT_NOTE        给访客的一句说明
  *   OWNER_PHONE      车主电话（可选，仅用于"联系车主"按钮，不写进页面源码）
+ *   OWNER_TOKEN      车主控制台凭证（必需，建议用 secret 配置；未配置时所有车主接口返回 503）
  *   BARK_URL / PUSHPLUS_TOKEN / PUSHPLUS_TOPIC / WXPUSHER_TOKEN / WXPUSHER_UIDS / WXPUSHER_TOPIC_IDS
  *
  * 与原挪车项目的差异（重要）：
@@ -32,6 +33,8 @@
  *   [2] 同意时写入 expireAt 与 cur:{spot}，车位同一时刻只认一条生效许可
  *   [3] 新增"我已驶离"释放动作，车主不用等到期才能腾出车位
  *   [4] 手机号只在车主接口返回明文，申请人页面源码与状态接口都拿不到
+ *   [5] 车主接口加 OWNER_TOKEN 凭证：list/app/decision/reply 与「车主结束占用」都要带 k，
+ *       未配置凭证时一律 503（fail closed），避免任何人枚举 sid 读号码、替车主操作
  */
 
 addEventListener('fetch', event => {
@@ -67,16 +70,16 @@ async function handleRequest(event) {
 
   if (method === 'POST') {
     if (path === '/api/apply') return handleApply(request, url, event)
-    if (path === '/api/release') return handleRelease(request)
+    if (path === '/api/release') return handleRelease(request, url)
     if (path === '/api/owner/decision') return handleOwnerDecision(request, url)
-    if (path === '/api/owner/reply') return handleOwnerReply(request)
+    if (path === '/api/owner/reply') return handleOwnerReply(request, url)
     return json({ success: false, error: 'not found' }, 404)
   }
 
   if (path === '/api/status') return handleStatus(url)
   if (path === '/api/owner-phone') return handleOwnerPhone(url)
-  if (path === '/api/owner/app') return handleOwnerApp(url)
-  if (path === '/api/owner/list') return handleOwnerList(url)
+  if (path === '/api/owner/app') return handleOwnerApp(request, url)
+  if (path === '/api/owner/list') return handleOwnerList(request, url)
 
   if (path === '/qr') return handleQr(url)
 
@@ -558,6 +561,80 @@ function qrSvg(text, px) {
 }
 
 /* ------------------------------------------------------------------ */
+/* 车主凭证                                                            */
+/* ------------------------------------------------------------------ */
+
+// 车主接口的唯一凭证：推送链接里的 ?k=、请求头 X-Owner-Token、POST body 的 k 三者认一个。
+// 设计上故意「没配就全拒」：fork 出去的人如果不知道要配，接口会明确报 503，
+// 而不是悄悄留着一个谁都能读手机号、谁都能替车主点同意的口子。
+const OWNER_TOKEN_MIN_LEN = 8
+
+function tokenFrom(request, url, body) {
+  if (url) {
+    const q = url.searchParams.get('k')
+    if (q) return q
+  }
+  if (request) {
+    const h = request.headers.get('X-Owner-Token')
+    if (h) return h
+  }
+  if (body && typeof body.k === 'string') return body.k
+  return ''
+}
+
+// 逐字节比较，避免用 === 时提前返回泄露前缀信息。长度会泄露，但长度不是秘密。
+function safeEqual(a, b) {
+  const x = String(a == null ? '' : a)
+  const y = String(b == null ? '' : b)
+  let diff = x.length ^ y.length
+  const n = Math.max(x.length, y.length)
+  for (let i = 0; i < n; i++) {
+    const cx = i < x.length ? x.charCodeAt(i) : 0
+    const cy = i < y.length ? y.charCodeAt(i) : 0
+    diff |= cx ^ cy
+  }
+  return diff === 0
+}
+
+// 取有效的车主凭证：未配置或短于 8 位都当作“没配”，一律 fail closed
+function ownerTokenValue() {
+  const v = (typeof OWNER_TOKEN !== 'undefined' && OWNER_TOKEN != null)
+    ? String(OWNER_TOKEN).trim()
+    : ''
+  return v.length >= OWNER_TOKEN_MIN_LEN ? v : ''
+}
+
+// 通过返回 null；不通过返回现成的 Response
+function requireOwner(request, url, body) {
+  const expected = ownerTokenValue()
+
+  if (!expected) {
+    return json({
+      success: false,
+      code: 'OWNER_TOKEN_MISSING',
+      error: '车主接口尚未配置访问凭证。请先执行 wrangler secret put OWNER_TOKEN（至少 8 位，或到 Cloudflare 后台添加同名变量）再重新打开链接。',
+    }, 503)
+  }
+
+  if (!safeEqual(tokenFrom(request, url, body), expected)) {
+    return json({
+      success: false,
+      code: 'OWNER_TOKEN_INVALID',
+      error: '车主凭证无效或已失效，请从推送里的链接重新进入。',
+    }, 401)
+  }
+
+  return null
+}
+
+// 推送给车主的链接：带上 sid，并把凭证塞进 k
+function ownerLink(origin, sid) {
+  const base = origin + '/owner?sid=' + encodeURIComponent(sid)
+  const token = ownerTokenValue()
+  return token ? base + '&k=' + encodeURIComponent(token) : base
+}
+
+/* ------------------------------------------------------------------ */
 /* 限流                                                                */
 /* ------------------------------------------------------------------ */
 
@@ -770,7 +847,7 @@ async function handleApply(request, url, event) {
     minutes,
   }, CONFIG.STATE_TTL)
 
-  const ownerUrl = url.origin + '/owner?sid=' + encodeURIComponent(sid)
+  const ownerUrl = ownerLink(url.origin, sid)
   const result = await pushAll(buildApplyPush(app, ownerUrl))
 
   // 推送失败不销毁申请：车主仍可能在列表里看到，申请人也能等待
@@ -816,9 +893,15 @@ async function handleStatus(url) {
 }
 
 // 申请人主动释放：车位空出来了，车主也该知道
-async function handleRelease(request) {
+async function handleRelease(request, url) {
   let body = {}
   try { body = await request.json() } catch (e) { body = {} }
+
+  // 访客凭 sid 就能释放自己的申请；以车主身份结束占用必须带凭证
+  if (body.by === 'owner') {
+    const denied = requireOwner(request, url, body)
+    if (denied) return denied
+  }
 
   const sid = sanitizeSid(body.sid)
   if (!sid) return json({ success: false, error: 'missing sid' }, 400)
@@ -846,7 +929,7 @@ async function handleRelease(request) {
 
   // 车主自己结束的就不用再通知自己了
   if (body.by !== 'owner' && body.notify === true) {
-    const ownerUrl = new URL(request.url).origin + '/owner?sid=' + encodeURIComponent(sid)
+    const ownerUrl = ownerLink(url.origin, sid)
     await pushAll({
       title: '车位已释放',
       text: '✅ ' + spotName(app.spot) + '：对方表示已驶离（' + (app.plate || '未填车牌') + '）',
@@ -888,7 +971,10 @@ async function handleOwnerPhone(url) {
 /* API：车主                                                           */
 /* ------------------------------------------------------------------ */
 
-async function handleOwnerApp(url) {
+async function handleOwnerApp(request, url) {
+  const denied = requireOwner(request, url)
+  if (denied) return denied
+
   const sid = sanitizeSid(url.searchParams.get('sid'))
   if (!sid) return json({ success: false, error: 'missing sid' }, 400)
 
@@ -913,7 +999,10 @@ async function handleOwnerApp(url) {
   })
 }
 
-async function handleOwnerList(url) {
+async function handleOwnerList(request, url) {
+  const denied = requireOwner(request, url)
+  if (denied) return denied
+
   const spot = sanitizeSpot(url.searchParams.get('spot') || '')
 
   let keys = []
@@ -952,6 +1041,9 @@ async function handleOwnerList(url) {
 async function handleOwnerDecision(request, url) {
   let body = {}
   try { body = await request.json() } catch (e) { body = {} }
+
+  const denied = requireOwner(request, url, body)
+  if (denied) return denied
 
   const sid = sanitizeSid(body.sid) || sanitizeSid(url.searchParams.get('sid'))
   if (!sid) return json({ success: false, error: 'missing sid' }, 400)
@@ -1030,9 +1122,12 @@ async function handleOwnerDecision(request, url) {
   })
 }
 
-async function handleOwnerReply(request) {
+async function handleOwnerReply(request, url) {
   let body = {}
   try { body = await request.json() } catch (e) { body = {} }
+
+  const denied = requireOwner(request, url, body)
+  if (denied) return denied
 
   const sid = sanitizeSid(body.sid)
   if (!sid) return json({ success: false, error: 'missing sid' }, 400)
@@ -2162,18 +2257,61 @@ function renderOwnerPage() {
         </div>
 
         <div style="margin-top:12px">
-          <a href="/owner" style="display:block;text-align:center;color:#cbd5e1;font-size:13px;text-decoration:none;padding:8px">查看全部申请</a>
+          <a id="allLink" href="/owner" style="display:block;text-align:center;color:#cbd5e1;font-size:13px;text-decoration:none;padding:8px">查看全部申请</a>
         </div>
       </div>
     </div>
 
     <script>
       var SID = new URLSearchParams(location.search).get('sid') || '';
+      var OWNER_KEY = new URLSearchParams(location.search).get('k') || '';
+      // 推送链接里带 k，进来后存本标签页，后续跳转/刷新都不用再带
+      try {
+        if (OWNER_KEY) sessionStorage.setItem('pm_owner_k', OWNER_KEY);
+        else OWNER_KEY = sessionStorage.getItem('pm_owner_k') || '';
+      } catch (e) {}
       var DATA = null;
       var grantMin = 0;
       var pendingReply = '';
 
       var QUICK = ['可以，注意别超时', '停吧，我晚上才回来', '可以，麻烦留个电话', '我马上要用车，麻烦快点'];
+
+      // 车主接口统一走这里：自动带凭证，省得每个调用点写一遍
+      function apiFetch(path, opts) {
+        opts = opts || {};
+        opts.cache = 'no-store';
+        var headers = Object.assign({}, opts.headers || {});
+        if (OWNER_KEY) headers['X-Owner-Token'] = OWNER_KEY;
+        opts.headers = headers;
+        return fetch(path, opts);
+      }
+
+      function authMessage(data) {
+        return (data && data.error) || '车主凭证无效，请从推送里的链接重新进入。';
+      }
+
+      // 401/503 单独处理：不能让用户误以为“申请已过期”
+      function authFailed(res, data) {
+        if (res.status === 401 || res.status === 503) {
+          renderAuthError(authMessage(data));
+          return true;
+        }
+        return false;
+      }
+
+      function renderAuthError(text) {
+        if (SID) {
+          document.getElementById('listView').style.display = 'none';
+          document.getElementById('detailView').style.display = '';
+          document.getElementById('detailCard').innerHTML =
+            '<div class="done-panel show"><div class="di">🔒</div><h3>需要车主凭证</h3>'
+            + '<p>' + esc(text) + '</p></div>';
+        } else {
+          document.getElementById('topSub').textContent = '未授权';
+          document.getElementById('listBody').innerHTML =
+            '<div class="empty">🔒 ' + esc(text) + '</div>';
+        }
+      }
 
       function toast(msg) {
         var t = document.getElementById('toast');
@@ -2212,8 +2350,9 @@ function renderOwnerPage() {
         var body = document.getElementById('listBody');
         body.innerHTML = '<div class="empty">加载中…</div>';
         try {
-          var res = await fetch('/api/owner/list', { cache: 'no-store' });
+          var res = await apiFetch('/api/owner/list');
           var data = await res.json();
+          if (authFailed(res, data)) return;
           if (!data.success) throw new Error(data.error || 'failed');
           var items = data.items || [];
           document.getElementById('topSub').textContent = items.length ? ('共 ' + items.length + ' 条记录') : '暂无待处理申请';
@@ -2225,7 +2364,8 @@ function renderOwnerPage() {
           items.forEach(function (it) {
             var a = document.createElement('a');
             a.className = 'item s-' + it.status;
-            a.href = '/owner?sid=' + encodeURIComponent(it.sid);
+            a.href = '/owner?sid=' + encodeURIComponent(it.sid)
+              + (OWNER_KEY ? '&k=' + encodeURIComponent(OWNER_KEY) : '');
             var icon = it.status === 'pending' ? '📩' : (it.status === 'overdue' ? '⏰' : '🚗');
             var label = it.status === 'pending' ? '待处理' : (it.status === 'overdue' ? '已超时' : '进行中');
             a.innerHTML =
@@ -2246,8 +2386,9 @@ function renderOwnerPage() {
         document.getElementById('listView').style.display = 'none';
         document.getElementById('detailView').style.display = '';
         try {
-          var res = await fetch('/api/owner/app?sid=' + encodeURIComponent(SID), { cache: 'no-store' });
+          var res = await apiFetch('/api/owner/app?sid=' + encodeURIComponent(SID));
           var data = await res.json();
+          if (authFailed(res, data)) return;
           if (!res.ok || !data.success) {
             document.getElementById('detailCard').innerHTML =
               '<div class="done-panel show"><div class="di">💤</div><h3>申请已过期</h3><p>这条申请已经超过保留时间，可能是很久之前的了。</p></div>';
@@ -2412,7 +2553,7 @@ function renderOwnerPage() {
         var text = currentReply();
         if (!text) { toast('写点什么再发'); return; }
         try {
-          var res = await fetch('/api/owner/reply', {
+          var res = await apiFetch('/api/owner/reply', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ sid: SID, text: text })
@@ -2422,6 +2563,8 @@ function renderOwnerPage() {
             document.getElementById('replyInput').value = '';
             renderBubbles(data.messages);
             toast('已发送');
+          } else if (authFailed(res, data)) {
+            return;
           } else {
             toast(data.error || '发送失败');
           }
@@ -2439,7 +2582,7 @@ function renderOwnerPage() {
         if (action === 'approve') body.minutes = grantMin;
 
         try {
-          var res = await fetch('/api/owner/decision', {
+          var res = await apiFetch('/api/owner/decision', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body)
@@ -2448,6 +2591,8 @@ function renderOwnerPage() {
           if (res.ok && data.success) {
             toast(action === 'approve' ? '✅ 已同意' : '已回绝');
             await loadDetail();
+          } else if (authFailed(res, data)) {
+            return;
           } else {
             toast(data.error || '操作失败');
             btnA.disabled = false; btnD.disabled = false;
@@ -2464,7 +2609,7 @@ function renderOwnerPage() {
         var app = DATA.app || {};
         var base = DATA.grantedMin || app.minutes || 60;
         try {
-          var res = await fetch('/api/owner/decision', {
+          var res = await apiFetch('/api/owner/decision', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ sid: SID, action: 'approve', minutes: base + 30, reply: '帮你多留了 30 分钟' })
@@ -2473,6 +2618,8 @@ function renderOwnerPage() {
           if (res.ok && data.success) {
             toast('已延长到 ' + fmtClock(data.expireAt));
             await loadDetail();
+          } else if (authFailed(res, data)) {
+            return;
           } else {
             toast(data.error || '延长失败');
           }
@@ -2482,7 +2629,7 @@ function renderOwnerPage() {
       async function endNow() {
         if (!confirm('确认结束这次占用？对方页面会立即显示已结束。')) return;
         try {
-          var res = await fetch('/api/release', {
+          var res = await apiFetch('/api/release', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ sid: SID, by: 'owner' })
@@ -2491,6 +2638,8 @@ function renderOwnerPage() {
           if (res.ok && data.success) {
             toast('已结束本次占用');
             await loadDetail();
+          } else if (authFailed(res, data)) {
+            return;
           } else {
             toast(data.error || '操作失败');
           }
@@ -2498,6 +2647,8 @@ function renderOwnerPage() {
       }
 
       window.onload = function () {
+        var all = document.getElementById('allLink');
+        if (all && OWNER_KEY) all.href = '/owner?k=' + encodeURIComponent(OWNER_KEY);
         if (SID) loadDetail(); else loadList();
       };
     </script>
