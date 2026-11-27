@@ -1962,6 +1962,19 @@ function renderApplyPage(url) {
 
       window.onload = async function () {
         buildChips();
+        // 结果页点「重新申请」会带 new=1 过来：丢掉旧会话，停在空表单上
+        // （不清掉的话下面 readSession() 会立刻把结果页又恢复出来，看起来像没反应）
+        var params = new URLSearchParams(location.search);
+        if (params.get('new') === '1') {
+          clearSession();
+          SID = '';
+          params.delete('new');
+          var qs = params.toString();
+          try {
+            history.replaceState(null, '', location.pathname + (qs ? '?' + qs : '') + location.hash);
+          } catch (e) {}
+          return;
+        }
         var saved = readSession();
         if (saved) {
           SID = saved;
