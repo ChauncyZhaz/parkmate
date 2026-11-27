@@ -221,14 +221,14 @@ check('车主可主动结束占用', ownerEnd.json.success === true && ownerEnd.
 const ownerEndStatus = await req('/api/status?sid=' + a2.json.sid)
 check('结束后申请人页面同步', ownerEndStatus.json.status === 'ended')
 
-console.log('\n=== 8. 到期判定 ===')
-// 手动把 expireAt 提前，验证 overdue
+console.log('\n=== 8. 到点自动释放 ===')
+// 手动把 expireAt 提前，验证到点即 ended（不再有 overdue）
 const stateKey = 'pst:' + sid
 const raw = JSON.parse(await sandbox.PARKING_KV.get(stateKey))
 raw.expireAt = Date.now() - 1000
 await sandbox.PARKING_KV.put(stateKey, JSON.stringify(raw), { expirationTtl: 3600 })
-const overdue = await req('/api/status?sid=' + sid)
-check('超时后状态变为 overdue', overdue.json.status === 'overdue', overdue.json.status)
+const autoEnded = await req('/api/status?sid=' + sid)
+check('到点自动释放（状态 ended）', autoEnded.json.status === 'ended', autoEnded.json.status)
 
 console.log('\n=== 8. 释放车位 ===')
 const release = await req('/api/release', { method: 'POST', body: { sid, by: 'visitor', notify: true } })
@@ -317,6 +317,37 @@ delete sandbox.OWNER_TOKEN
 const noConfig = await req('/api/owner/list')
 check('未配置 OWNER_TOKEN 时返回 503', noConfig.status === 503, String(noConfig.status))
 sandbox.OWNER_TOKEN = GOOD_TOKEN
+
+console.log('\n=== 15. 车主「我要用车」 ===')
+const noTokenBlock = await req('/api/owner/block', { method: 'POST', token: null, body: { spot: 'G7-777', minutes: 30 } })
+check('无凭证不能设置返回时间', noTokenBlock.status === 401, String(noTokenBlock.status))
+
+const setBlk = await req('/api/owner/block', { method: 'POST', body: { spot: 'G7-777', minutes: 45 } })
+check('设置返回时间成功', setBlk.json.success === true && Number(setBlk.json.block.until) > Date.now())
+
+const getBlk = await req('/api/owner/block?spot=G7-777')
+check('能读回设置', !!getBlk.json.block && Number(getBlk.json.block.until) === Number(setBlk.json.block.until))
+
+const blockedApply = await req('/api/apply', {
+  method: 'POST', ip: '8.8.8.1',
+  body: { spot: 'G7-777', minutes: 30, phone: '13600136001', reason: '临停' },
+})
+check('设置期间无法申请', blockedApply.status === 409 && blockedApply.json.blocked === true, String(blockedApply.status))
+
+const blockedPage = await req('/?spot=G7-777')
+check('申请页提示车主返回时间',
+  blockedPage.text.includes('<div class="busy-banner">') &&
+  blockedPage.text.includes('回到车位') &&
+  blockedPage.text.includes('class="submit" disabled'))
+
+const clearBlk = await req('/api/owner/block', { method: 'POST', body: { spot: 'G7-777', action: 'clear' } })
+check('取消返回时间成功', clearBlk.json.success === true && clearBlk.json.block === null)
+
+const afterClear = await req('/api/apply', {
+  method: 'POST', ip: '8.8.8.2',
+  body: { spot: 'G7-777', minutes: 30, phone: '13600136002', reason: '临停' },
+})
+check('取消后可以正常申请', afterClear.status === 200 && afterClear.json.success === true, String(afterClear.status))
 
 /* ---------------- 汇总 ---------------- */
 console.log('\n────────────────────────────')

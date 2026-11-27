@@ -16,6 +16,8 @@
  *   GET  /api/owner-phone?sid=      申请人取车主电话（需会话有效）
  *   GET  /api/owner/app?sid=        车主读取申请详情（含联系电话）
  *   GET  /api/owner/list            车主读取待处理/进行中的申请列表
+ *   GET  /api/owner/block?spot=     车主读取「我要用车」状态
+ *   POST /api/owner/block           设置/取消「我要用车」（minutes 或 action=clear）
  *   POST /api/owner/decision        车主同意 / 不同意
  *   POST /api/owner/reply           车主追加留言
  *
@@ -29,7 +31,8 @@
  *   BARK_URL / PUSHPLUS_TOKEN / PUSHPLUS_TOPIC / WXPUSHER_TOKEN / WXPUSHER_UIDS / WXPUSHER_TOPIC_IDS
  *
  * 与原挪车项目的差异（重要）：
- *   [1] 状态机从"等待/已确认"扩展为 pending → approved / declined / expired / overdue / ended
+ *   [1] 状态机从"等待/已确认"扩展为 pending → approved / declined / expired / ended
+ *       （到期不再保留 overdue，到点直接按 ended 计算，车位自动释放）
  *   [2] 同意时写入 expireAt 与 cur:{spot}，车位同一时刻只认一条生效许可
  *   [3] 新增"我已驶离"释放动作，车主不用等到期才能腾出车位
  *   [4] 手机号只在车主接口返回明文，申请人页面源码与状态接口都拿不到
@@ -49,6 +52,8 @@ const CONFIG = {
   PENDING_TTL_MS: 15 * 60000,    // 待处理申请 15 分钟没人管就失效，避免车主看到过期请求
   MAX_MINUTES: 480,              // 单次最长 8 小时
   MIN_MINUTES: 15,
+  BLOCK_MIN_MINUTES: 15,         // 车主「我要用车」最短 15 分钟
+  BLOCK_MAX_MINUTES: 480,
   RATE_LIMIT_PER_MIN: 3,         // 单 IP 每分钟最多提交几次申请
   MAX_MESSAGES: 20,
   MAX_ACTIVE_LIST: 30,           // 车主列表最多扫多少个 key
@@ -73,6 +78,7 @@ async function handleRequest(event) {
     if (path === '/api/release') return handleRelease(request, url)
     if (path === '/api/owner/decision') return handleOwnerDecision(request, url)
     if (path === '/api/owner/reply') return handleOwnerReply(request, url)
+    if (path === '/api/owner/block') return handleOwnerBlock(request, url)
     return json({ success: false, error: 'not found' }, 404)
   }
 
@@ -80,6 +86,7 @@ async function handleRequest(event) {
   if (path === '/api/owner-phone') return handleOwnerPhone(url)
   if (path === '/api/owner/app') return handleOwnerApp(request, url)
   if (path === '/api/owner/list') return handleOwnerList(request, url)
+  if (path === '/api/owner/block') return handleOwnerBlock(request, url)
 
   if (path === '/qr') return handleQr(url)
 
@@ -198,6 +205,7 @@ const K = {
   state: sid => 'pst:' + sid,
   msgs: sid => 'pmsg:' + sid,
   cur: spot => 'pcur:' + (spot || '_'),
+  block: spot => 'pblk:' + (spot || '_'),
   rl: (ip, bucket) => 'prl:' + ip + ':' + bucket,
 }
 
@@ -223,17 +231,34 @@ async function readCurrent(spot) {
   return cur
 }
 
-// 渲染申请页时的占用快照：超时未驶离的也算法「占用中」，只是提示文案不同
+// 只清掉属于这条申请的占用标记，避免误删别人刚拿到的许可
+async function clearCurrent(spot, sid) {
+  if (!sid) return
+  const cur = await readCurrent(spot)
+  if (cur && cur.sid === sid) await kv().delete(K.cur(spot))
+}
+
+// 渲染申请页时的占用快照。到点即视为释放，不再区分“超时”
 async function spotOccupancy(spot) {
   const cur = await readJson(K.cur(spot))
   if (!cur || !cur.expireAt) return null
   const expireAt = Number(cur.expireAt)
   const now = Date.now()
+  if (now >= expireAt) return null
   return {
     expireAt,
-    remainMin: Math.max(0, Math.round((expireAt - now) / 60000)),
-    overdue: now > expireAt,
+    remainMin: Math.max(1, Math.round((expireAt - now) / 60000)),
   }
+}
+
+// 车主「我要用车」：设置一段时间不接受新申请。到点自动失效。
+async function readBlock(spot) {
+  const b = await readJson(K.block(spot))
+  if (!b || !b.until) return null
+  const until = Number(b.until)
+  const now = Date.now()
+  if (now >= until) return null
+  return { until, remainMin: Math.max(1, Math.round((until - now) / 60000)) }
 }
 
 // 根据 state + 时间算出对外展示的状态
@@ -246,7 +271,8 @@ function resolveStatus(state) {
     return 'pending'
   }
   if (state.status === 'approved') {
-    if (state.expireAt && now > Number(state.expireAt)) return 'overdue'
+    // 到点即自动释放：不再保留 overdue 状态
+    if (state.expireAt && now > Number(state.expireAt)) return 'ended'
     return 'approved'
   }
   return state.status
@@ -825,6 +851,20 @@ async function handleApply(request, url, event) {
     return json({ success: false, error: '请填写正确的 11 位手机号，便于车主联系你' }, 400)
   }
 
+  // 车主设置了「我要用车」：这段时间一律不接新申请
+  {
+    const blk = await readBlock(spot)
+    if (blk) {
+      return json({
+        success: false,
+        blocked: true,
+        error: '车主预计 ' + fmtHM(blk.until) + ' 回到车位，暂不接受新的借用',
+        until: blk.until,
+        remainMin: Math.max(1, Math.round((blk.until - Date.now()) / 60000)),
+      }, 409)
+    }
+  }
+
   // 车位正被占用时直接拒绝：不提供排队（否则一条车位会挂着多条申请，
   // 车主批准后一条就会把前一条顶成 ended，容易误伤正在停的人）
   {
@@ -925,6 +965,8 @@ async function handleRelease(request, url) {
 
   const status = resolveStatus(state)
   if (status === 'ended' || status === 'declined' || status === 'expired') {
+    // 已经是终态也别把 pcur 留着：到点自动结束后再点「我已驶离」就走这条路
+    await clearCurrent(app.spot, sid)
     return json({ success: true, status })
   }
 
@@ -935,10 +977,7 @@ async function handleRelease(request, url) {
     endedBy: body.by === 'owner' ? 'owner' : 'visitor',
   }, CONFIG.STATE_TTL)
 
-  const cur = await readCurrent(app.spot)
-  if (cur && cur.sid === sid) {
-    await kv().delete(K.cur(app.spot))
-  }
+  await clearCurrent(app.spot, sid)
 
   // 车主自己结束的就不用再通知自己了
   if (body.by !== 'owner' && body.notify === true) {
@@ -1051,6 +1090,41 @@ async function handleOwnerList(request, url) {
   return json({ success: true, items: list })
 }
 
+/* API：车主「我要用车」——设一段时间不接新申请，到点自动失效 */
+async function handleOwnerBlock(request, url) {
+  let body = {}
+  if (request.method === 'POST') {
+    try { body = await request.json() } catch (e) { body = {} }
+  }
+
+  const denied = requireOwner(request, url, body)
+  if (denied) return denied
+
+  const spot = sanitizeSpot(body.spot || url.searchParams.get('spot') || '')
+
+  if (request.method !== 'POST') {
+    return json({ success: true, spot, block: await readBlock(spot) })
+  }
+
+  if (body.action === 'clear') {
+    await kv().delete(K.block(spot))
+    return json({ success: true, spot, block: null })
+  }
+
+  const minutes = Math.round(Number(body.minutes))
+  if (!Number.isFinite(minutes) || minutes < CONFIG.BLOCK_MIN_MINUTES || minutes > CONFIG.BLOCK_MAX_MINUTES) {
+    return json({
+      success: false,
+      error: '返回时间请选 ' + CONFIG.BLOCK_MIN_MINUTES + ' 分钟到 ' + formatMinutes(CONFIG.BLOCK_MAX_MINUTES),
+    }, 400)
+  }
+
+  const until = Date.now() + minutes * 60000
+  // 多留 60 秒，避免「正好到点」时 key 先过期、页面还显示占用
+  await writeJson(K.block(spot), { until, createdAt: Date.now() }, minutes * 60 + 60)
+  return json({ success: true, spot, block: { until } })
+}
+
 async function handleOwnerDecision(request, url) {
   let body = {}
   try { body = await request.json() } catch (e) { body = {} }
@@ -1069,7 +1143,7 @@ async function handleOwnerDecision(request, url) {
   if (!state) return json({ success: false, error: '申请状态异常' }, 404)
 
   const current = resolveStatus(state)
-  if (current === 'ended') return json({ success: false, error: '申请人已驶离，无需处理' }, 409)
+  if (current === 'ended') return json({ success: false, error: '这条申请已经结束（到点自动释放或对方已驶离）' }, 409)
 
   const reply = String(body.reply == null ? '' : body.reply).trim().slice(0, 100)
   const now = Date.now()
@@ -1189,24 +1263,32 @@ async function renderApplyPage(url) {
   // 顶部大字：优先 URL 里的车位号，其次配置的车位名首段（避免把「私家车位」重复放大）
   const spotNo = spot || (name && name !== '私家车位' ? name.split(/[\s·]+/)[0] : '')
 
-  // 扫码就能看到车位现在有没有人占，别让人填完整张表才被 409 顶回来
+  // 扫码就能看到车位现在有没有人占 / 车主是不是马上回来，别让人填完整张表才被 409 顶回来
   let occ = null
-  try { occ = await spotOccupancy(spot) } catch (e) { console.error('占用状态读取失败', msgOf(e)) }
+  let blk = null
+  try {
+    occ = await spotOccupancy(spot)
+    blk = await readBlock(spot)
+  } catch (e) { console.error('车位状态读取失败', msgOf(e)) }
+
+  // 不能申请的原因：正在被占优先于「车主快回来了」
+  const pause = occ ? 'occupied' : (blk ? 'blocked' : '')
 
   const badge = occ
-    ? (occ.overdue
-      ? '<span class="live busy"><i></i>已超时 · 待驶离</span>'
-      : '<span class="live busy"><i></i>使用中 · ' + fmtHM(occ.expireAt) + ' 释放</span>')
-    : '<span class="live"><i></i>可临时借用</span>'
+    ? '<span class="live busy"><i></i>使用中 · ' + fmtHM(occ.expireAt) + ' 释放</span>'
+    : (blk
+      ? '<span class="live busy"><i></i>车主 ' + fmtHM(blk.until) + ' 回来</span>'
+      : '<span class="live"><i></i>可临时借用</span>')
 
   const busyBanner = occ ? `
           <div class="busy-banner">
-            <div class="t">${occ.overdue ? '前一位已经超时了' : '车位正在使用中'}</div>
-            <div class="d">${occ.overdue
-              ? '已经超过约定时间，车主应该在联系对方挪车。'
-              : '预计 <b>' + fmtHM(occ.expireAt) + '</b> 释放，还剩约 ' + formatMinutes(Math.max(1, occ.remainMin)) + '。'}
-              车位空出来之后才能提交申请，晚点再来试试。</div>
-          </div>` : ''
+            <div class="t">车位正在使用中</div>
+            <div class="d">预计 <b>${fmtHM(occ.expireAt)}</b> 释放，还剩约 ${formatMinutes(occ.remainMin)}。${blk ? '车主预计 <b>' + fmtHM(blk.until) + '</b> 回来。' : ''}车位空出来之后才能提交申请，晚点再来试试。</div>
+          </div>` : (blk ? `
+          <div class="busy-banner">
+            <div class="t">车主马上要回来了</div>
+            <div class="d">预计 <b>${fmtHM(blk.until)}</b> 回到车位，约 ${formatMinutes(blk.remainMin)}后。这段时间不接受新的临时停靠，等车主把车停好之后再扫码吧。</div>
+          </div>` : '')
 
   const page = `
   <!DOCTYPE html>
@@ -1433,8 +1515,6 @@ async function renderApplyPage(url) {
       .status-card.s-approved h2 { color: #065f46; }
       .status-card.s-declined .status-icon { background: #fff1f2; }
       .status-card.s-declined h2 { color: #9f1239; }
-      .status-card.s-overdue .status-icon { background: #fee2e2; }
-      .status-card.s-overdue h2 { color: #991b1b; }
       .status-card.s-expired .status-icon { background: #f1f5f9; }
       .status-card.s-expired h2 { color: #475569; }
       .status-card.s-ended .status-icon { background: #eff6ff; }
@@ -1567,7 +1647,7 @@ ${busyBanner}
             <button type="button" onclick="location.reload()">刷新看看</button>
           </div>
 
-          <button id="submitBtn" class="submit"${occ ? ' disabled' : ''} onclick="submitApply()"><span>${occ ? '车位使用中 · 暂不可申请' : '发送借用申请'}</span></button>
+          <button id="submitBtn" class="submit"${pause ? ' disabled' : ''} onclick="submitApply()"><span>${pause === 'blocked' ? '车主即将回来 · 暂不可申请' : (pause === 'occupied' ? '车位使用中 · 暂不可申请' : '发送借用申请')}</span></button>
         </div>
       </div>
 
@@ -1605,8 +1685,9 @@ ${busyBanner}
 
     <script>
       var SPOT = ${JSON.stringify(spot)};
-      // 服务端渲染时就带上占用状态；提交时若发现刚被占，也会翻成 true
-      var busy = ${occ ? 'true' : 'false'};
+      // 'occupied' | 'blocked' | ''：服务端渲染时带上，提交时若发现状态变了也会翻过来
+      var pauseKind = ${JSON.stringify(pause)};
+      var busy = !!pauseKind;
       var SID = '';
       var currentStatus = 'pending';
       var serverSkew = 0;
@@ -1646,15 +1727,23 @@ ${busyBanner}
         return h + ' 小时 ' + r + ' 分钟';
       }
 
-      // 顶部徽标同步成「使用中 · HH:MM 释放」
-      function markBusy(until) {
+      function pauseText() {
+        return pauseKind === 'blocked' ? '车主即将回来 · 暂不可申请' : '车位使用中 · 暂不可申请';
+      }
+
+      // 顶部徽标同步成「使用中 · HH:MM 释放」或「车主 HH:MM 回来」
+      function markPause(kind, until) {
+        pauseKind = kind;
+        busy = true;
         var el = document.querySelector('.live');
         if (!el || !until) return;
         var d = new Date(Number(until) + 8 * 3600 * 1000);
         var hh = String(d.getUTCHours()).padStart(2, '0');
         var mm = String(d.getUTCMinutes()).padStart(2, '0');
         el.className = 'live busy';
-        el.innerHTML = '<i></i>使用中 · ' + hh + ':' + mm + ' 释放';
+        el.innerHTML = '<i></i>' + (kind === 'blocked'
+          ? '车主 ' + hh + ':' + mm + ' 回来'
+          : '使用中 · ' + hh + ':' + mm + ' 释放');
       }
 
       function toggleExtra() {
@@ -1775,16 +1864,17 @@ ${busyBanner}
           });
           var data = await res.json().catch(function () { return {}; });
 
-          if (res.status === 409 && data.occupied) {
-            // 填表期间车位刚被批出去：直接锁掉提交，别让人反复试
-            busy = true;
+          if (res.status === 409 && (data.occupied || data.blocked)) {
+            // 填表期间状态变了（刚被占 / 车主刚设了返回时间）：直接锁掉提交
+            var kind = data.blocked ? 'blocked' : 'occupied';
+            markPause(kind, data.until);
             document.getElementById('occupyText').textContent = data.error + '（还剩 ' + (data.remainMin || 0) + ' 分钟）';
-            document.getElementById('occupyHint').textContent = '等车位空出来再提交就好。';
+            document.getElementById('occupyHint').textContent = data.blocked
+              ? '等车主回来停好车之后再来吧。'
+              : '等车位空出来再提交就好。';
             document.getElementById('occupyTip').classList.add('show');
-            var sb = document.getElementById('submitBtn');
-            sb.querySelector('span').textContent = '车位使用中 · 暂不可申请';
-            markBusy(data.until);
-            toast('车位正在使用中');
+            document.getElementById('submitBtn').querySelector('span').textContent = pauseText();
+            toast(data.blocked ? '车主马上要回来了' : '车位正在使用中');
             return;
           }
 
@@ -1800,7 +1890,7 @@ ${busyBanner}
           toast('❌ 网络异常，请重试');
         } finally {
           btn.disabled = busy;
-          btn.innerHTML = '<span>' + (busy ? '车位使用中 · 暂不可申请' : '发送借用申请') + '</span>';
+          btn.innerHTML = '<span>' + (busy ? pauseText() : '发送借用申请') + '</span>';
         }
       }
 
@@ -1852,14 +1942,6 @@ ${busyBanner}
           document.getElementById('timerRange').textContent =
             '可用至 ' + fmtClock(data.expireAt) + '（批准 ' + fmtMin(data.grantedMin || data.minutes) + '）';
           updateTimer();
-        } else if (data.status === 'overdue') {
-          icon.textContent = '⏰';
-          title.textContent = '已超过允许时间';
-          desc.textContent = '请尽快驶离，车位主人可能已经在等了。';
-          timerBox.classList.add('show');
-          expireAt = Number(data.expireAt) || 0;
-          document.getElementById('timerRange').textContent = '原定 ' + fmtClock(data.expireAt) + ' 结束';
-          updateTimer();
         } else if (data.status === 'declined') {
           icon.textContent = '🙏';
           title.textContent = '车主暂时不方便';
@@ -1872,8 +1954,8 @@ ${busyBanner}
           releaseBtn.style.display = 'none';
         } else if (data.status === 'ended') {
           icon.textContent = '🚗';
-          title.textContent = '本次占用已结束';
-          desc.textContent = '车位已释放，谢谢配合。';
+          title.textContent = '本次借用已结束';
+          desc.textContent = '车位已自动释放。如果车还没挪，麻烦尽快挪一下，谢谢配合。';
           releaseBtn.style.display = 'none';
         }
 
@@ -1881,13 +1963,13 @@ ${busyBanner}
         renderMessages(data.messages);
 
         // 按钮按状态显隐：能开车走的时候才给"我已驶离"，没戏了才给"重新申请"
-        var canRelease = (data.status === 'pending' || data.status === 'approved' || data.status === 'overdue');
+        var canRelease = (data.status === 'pending' || data.status === 'approved');
         releaseBtn.style.display = canRelease ? '' : 'none';
-        var canAgain = (data.status === 'declined' || data.status === 'expired' || data.status === 'ended' || data.status === 'overdue');
+        var canAgain = (data.status === 'declined' || data.status === 'expired' || data.status === 'ended');
         document.getElementById('againBtn').style.display = canAgain ? '' : 'none';
 
-        // 到点后继续倒计时没有意义，但仍然保留"我已驶离"
-        if (data.status === 'overdue' || data.status === 'ended') {
+        // 到点自动释放后就不用再倒计时了
+        if (data.status === 'ended') {
           if (timer) { clearInterval(timer); timer = null; }
         }
       }
@@ -1900,7 +1982,7 @@ ${busyBanner}
         if (data.grantedMin && data.grantedMin !== data.minutes) rows.push(['批准时长', fmtMin(data.grantedMin)]);
         rows.push(['原因', data.reason || '临时停一下']);
         rows.push(['申请时间', fmtClock(data.createdAt)]);
-        if (data.expireAt && (data.status === 'approved' || data.status === 'overdue')) {
+        if (data.expireAt && data.status === 'approved') {
           rows.push(['到期时间', fmtClock(data.expireAt)]);
         }
         var html = '';
@@ -2217,6 +2299,21 @@ function renderOwnerPage() {
       .done-panel p { font-size: clamp(13px, 3.5vw, 14px); color: #64748b; line-height: 1.65; }
 
       /* 列表 */
+      .block-card { padding: clamp(15px, 3.8vw, 19px) clamp(16px, 4vw, 22px); border-bottom: 1px solid #eef2f7; }
+      .bk-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+      .bk-t { font-size: clamp(14px, 3.8vw, 15.5px); font-weight: 800; color: var(--ink); }
+      .bk-s { font-size: 11.5px; color: #94a3b8; }
+      .block-card .chips { margin-top: 10px; }
+      .block-card .chip { min-height: 36px; }
+      .bk-now {
+        margin-top: 10px; display: flex; align-items: center; justify-content: space-between; gap: 10px;
+        background: #fffbeb; border: 1px solid #fde68a; color: #92400e;
+        border-radius: 11px; padding: 8px 11px; font-size: 12.5px; font-weight: 700;
+      }
+      .bk-now button {
+        border: 1px solid #fbbf24; background: #fff; color: #92400e; border-radius: 8px;
+        padding: 5px 10px; font-family: inherit; font-size: 12px; font-weight: 700; cursor: pointer;
+      }
       .list-head { padding: clamp(18px, 4.5vw, 24px) clamp(18px, 4.5vw, 24px) 6px; }
       .list-head h1 { font-size: clamp(18px, 4.8vw, 22px); color: var(--ink); }
       .list-head p { font-size: 12.5px; color: var(--muted); margin-top: 5px; }
@@ -2234,14 +2331,12 @@ function renderOwnerPage() {
         background: #ccfbf1;
       }
       .item.s-pending .avatar { background: #fef3c7; }
-      .item.s-overdue .avatar { background: #fee2e2; }
       .item .body { flex: 1; min-width: 0; }
       .item .l1 { font-size: clamp(14px, 3.8vw, 15.5px); font-weight: 700; color: var(--ink); }
       .item .l2 { font-size: 12px; color: var(--muted); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
       .item .st { font-size: 11.5px; font-weight: 700; border-radius: 999px; padding: 4px 10px; flex-shrink: 0; }
       .item.s-pending .st { background: #fef3c7; color: #92400e; }
       .item.s-approved .st { background: #ccfbf1; color: #115e59; }
-      .item.s-overdue .st { background: #fee2e2; color: #991b1b; }
       .empty { padding: 40px 20px; text-align: center; color: #94a3b8; font-size: 14px; line-height: 1.7; }
 
       .toast {
@@ -2270,6 +2365,22 @@ function renderOwnerPage() {
 
       <!-- 列表视图 -->
       <div class="card" id="listView" style="display:none">
+        <div class="block-card">
+          <div class="bk-head">
+            <span class="bk-t">我要用车</span>
+            <span class="bk-s" id="bkState">设置后暂停接受申请</span>
+          </div>
+          <div class="chips">
+            <button type="button" class="chip" onclick="setBlock(30)">30 分钟</button>
+            <button type="button" class="chip" onclick="setBlock(60)">1 小时</button>
+            <button type="button" class="chip" onclick="setBlock(120)">2 小时</button>
+            <button type="button" class="chip" onclick="setBlock(240)">4 小时</button>
+          </div>
+          <div class="bk-now" id="bkNow" style="display:none">
+            <span id="bkNowText"></span>
+            <button type="button" onclick="clearBlock()">取消</button>
+          </div>
+        </div>
         <div class="list-head">
           <h1>待处理 / 进行中</h1>
           <p>点开可以同意、拒绝或回一句话</p>
@@ -2345,6 +2456,9 @@ function renderOwnerPage() {
     <script>
       var SID = new URLSearchParams(location.search).get('sid') || '';
       var OWNER_KEY = new URLSearchParams(location.search).get('k') || '';
+      // 「我要用车」作用的车位：优先 ?spot=，否则取列表里最近一条的车位
+      var BLOCK_SPOT = new URLSearchParams(location.search).get('spot') || '';
+      var BLOCK = null;
       // 推送链接里带 k，进来后存本标签页，后续跳转/刷新都不用再带
       try {
         if (OWNER_KEY) sessionStorage.setItem('pm_owner_k', OWNER_KEY);
@@ -2421,7 +2535,8 @@ function renderOwnerPage() {
       }
 
       function reload() {
-        if (SID) loadDetail(); else loadList();
+        if (SID) loadDetail();
+        else loadList().then(function () { loadBlock(); });
       }
 
       async function loadList() {
@@ -2432,13 +2547,13 @@ function renderOwnerPage() {
         try {
           var res = await apiFetch('/api/owner/list');
           var data = await res.json();
-          if (authFailed(res, data)) return;
+          if (authFailed(res, data)) return [];
           if (!data.success) throw new Error(data.error || 'failed');
           var items = data.items || [];
           document.getElementById('topSub').textContent = items.length ? ('共 ' + items.length + ' 条记录') : '暂无待处理申请';
           if (!items.length) {
             body.innerHTML = '<div class="empty">暂时没有申请<br>把二维码贴在车位上就行</div>';
-            return;
+            return [];
           }
           body.innerHTML = '';
           items.forEach(function (it) {
@@ -2446,8 +2561,8 @@ function renderOwnerPage() {
             a.className = 'item s-' + it.status;
             a.href = '/owner?sid=' + encodeURIComponent(it.sid)
               + (OWNER_KEY ? '&k=' + encodeURIComponent(OWNER_KEY) : '');
-            var icon = it.status === 'pending' ? '📩' : (it.status === 'overdue' ? '⏰' : '🚗');
-            var label = it.status === 'pending' ? '待处理' : (it.status === 'overdue' ? '已超时' : '进行中');
+            var icon = it.status === 'pending' ? '📩' : '🚗';
+            var label = it.status === 'pending' ? '待处理' : '进行中';
             a.innerHTML =
               '<div class="avatar">' + icon + '</div>' +
               '<div class="body">' +
@@ -2457,9 +2572,78 @@ function renderOwnerPage() {
               '<div class="st">' + label + '</div>';
             body.appendChild(a);
           });
+          return items;
         } catch (e) {
           body.innerHTML = '<div class="empty">读取失败，请刷新</div>';
+          return [];
         }
+      }
+
+      // 车主「我要用车」：设置后这段时间不接新申请，到点自动恢复
+      async function loadBlock() {
+        if (!BLOCK_SPOT) { renderBlock(null); return; }
+        try {
+          var res = await apiFetch('/api/owner/block?spot=' + encodeURIComponent(BLOCK_SPOT));
+          var data = await res.json();
+          if (authFailed(res, data)) return;
+          BLOCK = data.block || null;
+        } catch (e) { BLOCK = null; }
+        renderBlock(BLOCK);
+      }
+
+      function renderBlock(b) {
+        var now = document.getElementById('bkNow');
+        var state = document.getElementById('bkState');
+        if (b) {
+          now.style.display = 'flex';
+          document.getElementById('bkNowText').textContent = '预计 ' + fmtClock(b.until) + ' 回来 · 暂停接单';
+          state.textContent = '车位 ' + (BLOCK_SPOT || '默认');
+        } else {
+          now.style.display = 'none';
+          state.textContent = BLOCK_SPOT
+            ? ('车位 ' + BLOCK_SPOT + ' · 现在可以接单')
+            : '多车位用 /owner?spot=车位号';
+        }
+      }
+
+      async function setBlock(min) {
+        if (!BLOCK_SPOT) { toast('先指定车位：/owner?spot=B2-078'); return; }
+        try {
+          var res = await apiFetch('/api/owner/block', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ spot: BLOCK_SPOT, minutes: min })
+          });
+          var data = await res.json();
+          if (authFailed(res, data)) return;
+          if (data.success) {
+            BLOCK = data.block;
+            renderBlock(BLOCK);
+            toast('已暂停接单，' + fmtClock(data.block.until) + ' 回车位');
+          } else {
+            toast(data.error || '设置失败');
+          }
+        } catch (e) { toast('网络异常'); }
+      }
+
+      async function clearBlock() {
+        if (!BLOCK_SPOT) return;
+        try {
+          var res = await apiFetch('/api/owner/block', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ spot: BLOCK_SPOT, action: 'clear' })
+          });
+          var data = await res.json();
+          if (authFailed(res, data)) return;
+          if (data.success) {
+            BLOCK = null;
+            renderBlock(null);
+            toast('已取消，恢复正常接单');
+          } else {
+            toast(data.error || '取消失败');
+          }
+        } catch (e) { toast('网络异常'); }
       }
 
       async function loadDetail() {
@@ -2493,7 +2677,7 @@ function renderOwnerPage() {
           ['车牌', app.plate || '未填写', false],
           ['状态', statusLabel(data.status), false],
         ];
-        if (data.status === 'approved' || data.status === 'overdue') {
+        if (data.status === 'approved') {
           rows.push(['到期时间', fmtClock(data.expireAt) + '（批准 ' + fmtMin(data.grantedMin || app.minutes) + '）', true]);
         }
         var html = '';
@@ -2519,7 +2703,7 @@ function renderOwnerPage() {
         renderBubbles(data.messages);
 
         var isPending = data.status === 'pending' || data.status === 'expired';
-        var isActive = data.status === 'approved' || data.status === 'overdue';
+        var isActive = data.status === 'approved';
 
         document.getElementById('actionRow').style.display = isPending ? 'flex' : 'none';
         document.getElementById('activeRow').style.display = isActive ? 'flex' : 'none';
@@ -2528,12 +2712,10 @@ function renderOwnerPage() {
         if (!isPending) {
           var panel = document.getElementById('donePanel');
           panel.classList.add('show');
-          if (data.status === 'approved' || data.status === 'overdue') {
-            document.getElementById('doneIcon').textContent = data.status === 'overdue' ? '⏰' : '✅';
-            document.getElementById('doneTitle').textContent = data.status === 'overdue' ? '已超时' : '已同意借用';
-            document.getElementById('doneDesc').textContent = data.status === 'overdue'
-              ? '原定 ' + fmtClock(data.expireAt) + ' 结束，已经超时了，可以电话催一下。'
-              : '可用至 ' + fmtClock(data.expireAt) + '，对方页面会显示倒计时。';
+          if (data.status === 'approved') {
+            document.getElementById('doneIcon').textContent = '✅';
+            document.getElementById('doneTitle').textContent = '已同意借用';
+            document.getElementById('doneDesc').textContent = '可用至 ' + fmtClock(data.expireAt) + '，到点自动释放，对方页面会显示倒计时。';
           } else if (data.status === 'declined') {
             document.getElementById('doneIcon').textContent = '🙏';
             document.getElementById('doneTitle').textContent = '已回绝';
@@ -2554,7 +2736,6 @@ function renderOwnerPage() {
         return ({
           pending: '等待你处理',
           approved: '已同意',
-          overdue: '已超时',
           declined: '已回绝',
           expired: '已过期',
           ended: '已结束',
@@ -2729,7 +2910,12 @@ function renderOwnerPage() {
       window.onload = function () {
         var all = document.getElementById('allLink');
         if (all && OWNER_KEY) all.href = '/owner?k=' + encodeURIComponent(OWNER_KEY);
-        if (SID) loadDetail(); else loadList();
+        if (SID) { loadDetail(); return; }
+        loadList().then(function (items) {
+          // 没显式指定车位时，用最近一条申请的车位，省得再手拼 ?spot=
+          if (!BLOCK_SPOT && items && items.length) BLOCK_SPOT = items[0].spot || '';
+          loadBlock();
+        });
       };
     </script>
   </body>
