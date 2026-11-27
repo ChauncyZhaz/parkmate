@@ -817,7 +817,6 @@ async function handleApply(request, url, event) {
   const phone = String(body.phone == null ? '' : body.phone).trim()
   const reason = String(body.reason == null ? '' : body.reason).trim().slice(0, 40) || DEFAULT_REASON
   const note = String(body.note == null ? '' : body.note).trim().slice(0, 120)
-  const force = body.force === true
 
   if (!Number.isFinite(minutes) || minutes < CONFIG.MIN_MINUTES || minutes > CONFIG.MAX_MINUTES) {
     return json({ success: false, error: '占用时长请填 ' + CONFIG.MIN_MINUTES + ' 分钟到 ' + formatMinutes(CONFIG.MAX_MINUTES) }, 400)
@@ -826,8 +825,9 @@ async function handleApply(request, url, event) {
     return json({ success: false, error: '请填写正确的 11 位手机号，便于车主联系你' }, 400)
   }
 
-  // 车位正被占用时，先让申请人知道，再由他决定是否继续（force）
-  if (!force) {
+  // 车位正被占用时直接拒绝：不提供排队（否则一条车位会挂着多条申请，
+  // 车主批准后一条就会把前一条顶成 ended，容易误伤正在停的人）
+  {
     const cur = await readCurrent(spot)
     if (cur) {
       return json({
@@ -1205,7 +1205,7 @@ async function renderApplyPage(url) {
             <div class="d">${occ.overdue
               ? '已经超过约定时间，车主应该在联系对方挪车。'
               : '预计 <b>' + fmtHM(occ.expireAt) + '</b> 释放，还剩约 ' + formatMinutes(Math.max(1, occ.remainMin)) + '。'}
-              现在提交会进入排队，车主同样会收到通知，由他决定要不要让你用。</div>
+              车位空出来之后才能提交申请，晚点再来试试。</div>
           </div>` : ''
 
   const page = `
@@ -1391,6 +1391,7 @@ async function renderApplyPage(url) {
       .occupy-tip.show { display: block; }
       .occupy-tip b { font-weight: 700; }
       .occupy-tip button { width: 100%; margin-top: 8px; min-height: 34px; border: 1px solid #fbbf24; background: #fff; color: #92400e; border-radius: 9px; font-family: inherit; font-size: 12px; font-weight: 700; cursor: pointer; }
+      .occupy-tip .hint { margin-top: 3px; font-size: 11px; color: #a16207; }
 
       .submit {
         width: 100%; height: 48px; margin-top: 12px;
@@ -1403,6 +1404,11 @@ async function renderApplyPage(url) {
       }
       .submit::after { content: '→'; font-size: 16px; font-weight: 500; opacity: .9; }
       .submit:hover { filter: brightness(1.06); }
+      .submit:disabled {
+        background: linear-gradient(135deg, #64748b, #7c8b9a);
+        box-shadow: none; cursor: not-allowed; opacity: .75;
+      }
+      .submit:disabled::after { content: ''; }
       .submit:active { transform: scale(.985); }
       .submit:disabled { background: #94a3b8; box-shadow: none; filter: none; }
       .foot { text-align: center; padding: 0 4px; font-size: 11px; line-height: 1.5; color: rgba(255,255,255,.6); }
@@ -1557,10 +1563,11 @@ ${busyBanner}
 
           <div id="occupyTip" class="occupy-tip">
             <b id="occupyText">车位正在被占用</b>
-            <button type="button" onclick="submitApply(true)">仍然提交（排队等车主处理）</button>
+            <div class="hint" id="occupyHint">等车位空出来再提交就好。</div>
+            <button type="button" onclick="location.reload()">刷新看看</button>
           </div>
 
-          <button id="submitBtn" class="submit" onclick="submitApply(${occ ? 'true' : 'false'})"><span>${occ ? '排队申请 · 车位使用中' : '发送借用申请'}</span></button>
+          <button id="submitBtn" class="submit"${occ ? ' disabled' : ''} onclick="submitApply()"><span>${occ ? '车位使用中 · 暂不可申请' : '发送借用申请'}</span></button>
         </div>
       </div>
 
@@ -1731,7 +1738,7 @@ ${busyBanner}
         t._t = setTimeout(function () { t.classList.remove('show'); }, 2600);
       }
 
-      async function submitApply(force) {
+      async function submitApply() {
         var btn = document.getElementById('submitBtn');
         var minutes = currentMinutes();
         var reason = (document.getElementById('reasonInput').value || '').trim();
@@ -1763,19 +1770,19 @@ ${busyBanner}
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               spot: SPOT, minutes: minutes, reason: reason, plate: plate,
-              phone: phone, note: note, force: !!(force || busy)
+              phone: phone, note: note
             })
           });
           var data = await res.json().catch(function () { return {}; });
 
-          if (res.status === 409 && data.occupied && !force) {
-            // 填表期间车位刚被批出去：把徽标和主按钮一起翻成排队态，别让页面自相矛盾
+          if (res.status === 409 && data.occupied) {
+            // 填表期间车位刚被批出去：直接锁掉提交，别让人反复试
             busy = true;
-            document.getElementById('occupyText').textContent = data.error + '，' + (data.remainMin || 0) + ' 分钟后释放';
+            document.getElementById('occupyText').textContent = data.error + '（还剩 ' + (data.remainMin || 0) + ' 分钟）';
+            document.getElementById('occupyHint').textContent = '等车位空出来再提交就好。';
             document.getElementById('occupyTip').classList.add('show');
             var sb = document.getElementById('submitBtn');
-            sb.setAttribute('onclick', 'submitApply(true)');
-            sb.querySelector('span').textContent = '排队申请 · 车位使用中';
+            sb.querySelector('span').textContent = '车位使用中 · 暂不可申请';
             markBusy(data.until);
             toast('车位正在使用中');
             return;
@@ -1792,8 +1799,8 @@ ${busyBanner}
         } catch (e) {
           toast('❌ 网络异常，请重试');
         } finally {
-          btn.disabled = false;
-          btn.innerHTML = '<span>' + (busy ? '排队申请 · 车位使用中' : '发送借用申请') + '</span>';
+          btn.disabled = busy;
+          btn.innerHTML = '<span>' + (busy ? '车位使用中 · 暂不可申请' : '发送借用申请') + '</span>';
         }
       }
 

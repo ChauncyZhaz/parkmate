@@ -178,17 +178,17 @@ const occupied = await req('/api/apply', {
 check('占用中再申请返回 409', occupied.status === 409, String(occupied.status))
 check('409 带占用提示与剩余分钟', occupied.json.occupied === true && occupied.json.remainMin > 0)
 
-const forced = await req('/api/apply', {
+const stillBlocked = await req('/api/apply', {
   method: 'POST', ip: '5.5.5.5',
   body: { spot: 'B2-078', minutes: 60, phone: '13700137000', reason: '临停', force: true },
 })
-check('force=true 仍可排队提交', forced.status === 200 && forced.json.success === true)
+check('占用中 force=true 也不再放行', stillBlocked.status === 409 && stillBlocked.json.occupied === true, String(stillBlocked.status))
 
 // 占用中打开申请页：状态要前置，别让人填完一整张表才被 409 顶回来
 const busyPage = await req('/?spot=B2-078')
 check('占用时徽标显示使用中', busyPage.text.includes('class="live busy"') && busyPage.text.includes('使用中 · '))
 check('占用时顶部有提示条', busyPage.text.includes('<div class="busy-banner">'))
-check('占用时主按钮改为排队', busyPage.text.includes('<span>排队申请'))
+check('占用时主按钮禁用', busyPage.text.includes('class="submit" disabled') && busyPage.text.includes('暂不可申请'))
 const freePage = await req('/?spot=FREE-001')
 check('空闲时无提示条', freePage.text.includes('可临时借用') && !freePage.text.includes('<div class="busy-banner">'))
 
