@@ -223,6 +223,19 @@ async function readCurrent(spot) {
   return cur
 }
 
+// 渲染申请页时的占用快照：超时未驶离的也算法「占用中」，只是提示文案不同
+async function spotOccupancy(spot) {
+  const cur = await readJson(K.cur(spot))
+  if (!cur || !cur.expireAt) return null
+  const expireAt = Number(cur.expireAt)
+  const now = Date.now()
+  return {
+    expireAt,
+    remainMin: Math.max(0, Math.round((expireAt - now) / 60000)),
+    overdue: now > expireAt,
+  }
+}
+
 // 根据 state + 时间算出对外展示的状态
 function resolveStatus(state) {
   if (!state || !state.status) return 'expired'
@@ -1169,12 +1182,31 @@ function handleQr(url) {
 /* 申请人页面                                                          */
 /* ------------------------------------------------------------------ */
 
-function renderApplyPage(url) {
+async function renderApplyPage(url) {
   const spot = sanitizeSpot(url.searchParams.get('spot') || '')
   const name = spotName(spot)
   const note = spotNote()
   // 顶部大字：优先 URL 里的车位号，其次配置的车位名首段（避免把「私家车位」重复放大）
   const spotNo = spot || (name && name !== '私家车位' ? name.split(/[\s·]+/)[0] : '')
+
+  // 扫码就能看到车位现在有没有人占，别让人填完整张表才被 409 顶回来
+  let occ = null
+  try { occ = await spotOccupancy(spot) } catch (e) { console.error('占用状态读取失败', msgOf(e)) }
+
+  const badge = occ
+    ? (occ.overdue
+      ? '<span class="live busy"><i></i>已超时 · 待驶离</span>'
+      : '<span class="live busy"><i></i>使用中 · ' + fmtHM(occ.expireAt) + ' 释放</span>')
+    : '<span class="live"><i></i>可临时借用</span>'
+
+  const busyBanner = occ ? `
+          <div class="busy-banner">
+            <div class="t">${occ.overdue ? '前一位已经超时了' : '车位正在使用中'}</div>
+            <div class="d">${occ.overdue
+              ? '已经超过约定时间，车主应该在联系对方挪车。'
+              : '预计 <b>' + fmtHM(occ.expireAt) + '</b> 释放，还剩约 ' + formatMinutes(Math.max(1, occ.remainMin)) + '。'}
+              现在提交会进入排队，车主同样会收到通知，由他决定要不要让你用。</div>
+          </div>` : ''
 
   const page = `
   <!DOCTYPE html>
@@ -1265,6 +1297,15 @@ function renderApplyPage(url) {
         font-size: 10.5px; font-weight: 600; color: #ccfbf1;
       }
       .live i { width: 5px; height: 5px; border-radius: 50%; background: #34d399; box-shadow: 0 0 0 3px rgba(52,211,153,.2); }
+      .live.busy { border-color: rgba(251,191,36,.34); background: rgba(251,191,36,.12); color: #fde68a; }
+      .live.busy i { background: #fbbf24; box-shadow: 0 0 0 3px rgba(251,191,36,.18); }
+      .busy-banner {
+        padding: 11px 15px 12px;
+        background: #fffbeb; border-top: 1px solid #fde68a; border-bottom: 1px solid #fef3c7;
+      }
+      .busy-banner .t { font-size: 12.5px; font-weight: 700; color: #92400e; }
+      .busy-banner .d { margin-top: 3px; font-size: 11.5px; line-height: 1.6; color: #a16207; }
+      .busy-banner b { color: #92400e; font-variant-numeric: tabular-nums; }
       .plate {
         position: relative; width: fit-content; min-width: 172px; max-width: 90%;
         margin: 12px auto 0; padding: 11px 28px 12px;
@@ -1468,13 +1509,13 @@ function renderApplyPage(url) {
           <span class="hero-mark" aria-hidden="true">P</span>
           <div class="hero-top">
             <span class="kicker">私家车位</span>
-            <span class="live"><i></i>可临时借用</span>
+            ${badge}
           </div>
           ${spotNo ? '<div class="plate" title="' + escapeHtml(spotNo) + '"><span class="plate-no">' + escapeHtml(spotNo) + '</span></div>' : ''}
           <h1${spotNo ? '' : ' class="lg"'}>想临时停一下？</h1>
           <p class="note" title="${escapeHtml(note)}">跟车主说一声就行 · ${escapeHtml(note)}</p>
         </div>
-
+${busyBanner}
         <div class="form">
           <section class="row">
             <div class="label"><span>占用时长<span class="req">必填</span></span><span class="sub">到点请挪车</span></div>
@@ -1516,10 +1557,10 @@ function renderApplyPage(url) {
 
           <div id="occupyTip" class="occupy-tip">
             <b id="occupyText">车位正在被占用</b>
-            <button type="button" onclick="submitApply(true)">仍然提交申请（排队）</button>
+            <button type="button" onclick="submitApply(true)">仍然提交（排队等车主处理）</button>
           </div>
 
-          <button id="submitBtn" class="submit" onclick="submitApply(false)"><span>发送借用申请</span></button>
+          <button id="submitBtn" class="submit" onclick="submitApply(${occ ? 'true' : 'false'})"><span>${occ ? '排队申请 · 车位使用中' : '发送借用申请'}</span></button>
         </div>
       </div>
 
@@ -1557,6 +1598,8 @@ function renderApplyPage(url) {
 
     <script>
       var SPOT = ${JSON.stringify(spot)};
+      // 服务端渲染时就带上占用状态；提交时若发现刚被占，也会翻成 true
+      var busy = ${occ ? 'true' : 'false'};
       var SID = '';
       var currentStatus = 'pending';
       var serverSkew = 0;
@@ -1594,6 +1637,17 @@ function renderApplyPage(url) {
         if (!h) return r + ' 分钟';
         if (!r) return h + ' 小时';
         return h + ' 小时 ' + r + ' 分钟';
+      }
+
+      // 顶部徽标同步成「使用中 · HH:MM 释放」
+      function markBusy(until) {
+        var el = document.querySelector('.live');
+        if (!el || !until) return;
+        var d = new Date(Number(until) + 8 * 3600 * 1000);
+        var hh = String(d.getUTCHours()).padStart(2, '0');
+        var mm = String(d.getUTCMinutes()).padStart(2, '0');
+        el.className = 'live busy';
+        el.innerHTML = '<i></i>使用中 · ' + hh + ':' + mm + ' 释放';
       }
 
       function toggleExtra() {
@@ -1709,14 +1763,20 @@ function renderApplyPage(url) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               spot: SPOT, minutes: minutes, reason: reason, plate: plate,
-              phone: phone, note: note, force: !!force
+              phone: phone, note: note, force: !!(force || busy)
             })
           });
           var data = await res.json().catch(function () { return {}; });
 
           if (res.status === 409 && data.occupied && !force) {
+            // 填表期间车位刚被批出去：把徽标和主按钮一起翻成排队态，别让页面自相矛盾
+            busy = true;
             document.getElementById('occupyText').textContent = data.error + '，' + (data.remainMin || 0) + ' 分钟后释放';
             document.getElementById('occupyTip').classList.add('show');
+            var sb = document.getElementById('submitBtn');
+            sb.setAttribute('onclick', 'submitApply(true)');
+            sb.querySelector('span').textContent = '排队申请 · 车位使用中';
+            markBusy(data.until);
             toast('车位正在使用中');
             return;
           }
@@ -1733,7 +1793,7 @@ function renderApplyPage(url) {
           toast('❌ 网络异常，请重试');
         } finally {
           btn.disabled = false;
-          btn.innerHTML = '<span>发送借用申请</span>';
+          btn.innerHTML = '<span>' + (busy ? '排队申请 · 车位使用中' : '发送借用申请') + '</span>';
         }
       }
 
