@@ -1078,6 +1078,8 @@ function renderApplyPage(url) {
   const spot = sanitizeSpot(url.searchParams.get('spot') || '')
   const name = spotName(spot)
   const note = spotNote()
+  // 顶部大字：优先 URL 里的车位号，其次配置的车位名首段（避免把「私家车位」重复放大）
+  const spotNo = spot || (name && name !== '私家车位' ? name.split(/[\s·]+/)[0] : '')
 
   const page = `
   <!DOCTYPE html>
@@ -1087,7 +1089,7 @@ function renderApplyPage(url) {
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=yes, viewport-fit=cover">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-    <meta name="theme-color" content="#4f46e5">
+    <meta name="theme-color" content="#08131c">
     <meta name="robots" content="noindex, nofollow">
     <title>${escapeHtml(name)} · 临时借用申请</title>
     <style>
@@ -1096,197 +1098,195 @@ function renderApplyPage(url) {
         --sar: env(safe-area-inset-right, 0px);
         --sab: env(safe-area-inset-bottom, 0px);
         --sal: env(safe-area-inset-left, 0px);
-        --brand: #4f46e5;
-        --brand2: #0ea5e9;
-        --ink: #1e293b;
-        --muted: #718096;
-        --line: #e6ecf5;
+        --ink: #101f2c;
+        --muted: #8494a4;
+        --line: #edf1f4;
+        --brand: #0f766e;
+        --soft: #e8f6f3;
+        --g: 11px;
       }
       * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; margin: 0; padding: 0; }
       html { font-size: 16px; -webkit-text-size-adjust: 100%; }
-      html, body { min-height: 100%; }
       body {
         font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "PingFang SC", "Segoe UI", Roboto, sans-serif;
-        background: linear-gradient(165deg, #4f46e5 0%, #3b82f6 46%, #0ea5e9 100%);
-        min-height: 100vh;
-        min-height: -webkit-fill-available;
-        padding: clamp(14px, 4vw, 24px);
-        padding-top: calc(clamp(14px, 4vw, 24px) + var(--sat));
-        padding-bottom: calc(clamp(20px, 5vw, 28px) + var(--sab));
-        padding-left: calc(clamp(14px, 4vw, 24px) + var(--sal));
-        padding-right: calc(clamp(14px, 4vw, 24px) + var(--sar));
-        display: flex;
-        justify-content: center;
-        align-items: flex-start;
-      }
-      body::after {
-        content: '';
-        position: fixed; inset: 0; z-index: -1; opacity: .35;
+        min-height: 100vh; min-height: 100dvh;
+        background: #08131c;
         background-image:
-          radial-gradient(circle at 18% 12%, rgba(255,255,255,.5) 0, transparent 42%),
-          radial-gradient(circle at 82% 78%, rgba(255,255,255,.28) 0, transparent 46%);
+          radial-gradient(120% 68% at 8% -12%, rgba(20,184,166,.30), transparent 62%),
+          radial-gradient(95% 62% at 102% 104%, rgba(56,132,246,.22), transparent 64%);
+        background-repeat: no-repeat;
+        display: flex; justify-content: center;
+        padding: calc(12px + var(--sat)) calc(12px + var(--sar)) calc(12px + var(--sab)) calc(12px + var(--sal));
       }
-      .wrap { width: 100%; max-width: 480px; display: flex; flex-direction: column; gap: clamp(10px, 2.6vw, 14px); }
-
+      .wrap { width: 100%; max-width: 430px; margin: auto; display: flex; flex-direction: column; gap: 9px; }
+      #resultView { display: none; }
       .card {
-        background: rgba(255,255,255,.97);
-        border-radius: clamp(18px, 4.5vw, 24px);
-        box-shadow: 0 12px 36px rgba(23, 42, 106, .22);
+        background: #fff;
+        border: 1px solid rgba(255,255,255,.75);
+        border-radius: 22px;
+        overflow: hidden;
+        box-shadow: 0 24px 60px rgba(2,16,26,.44), 0 2px 8px rgba(2,16,26,.16);
+        animation: rise .4s cubic-bezier(.22,1,.36,1) both;
       }
+      @keyframes rise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
 
-      .head { padding: clamp(20px, 5vw, 28px) clamp(18px, 4.5vw, 26px); text-align: center; }
-      .badge {
-        display: inline-flex; align-items: center; gap: 6px;
-        background: #eef2ff; color: #4338ca;
-        border: 1px solid #c7d2fe;
-        padding: 5px 12px; border-radius: 999px;
-        font-size: clamp(11px, 3vw, 12.5px); font-weight: 700; letter-spacing: .02em;
+      .hero {
+        position: relative; overflow: hidden;
+        padding: 16px 18px 18px;
+        border-radius: 21px 21px 0 0;
+        background:
+          radial-gradient(130% 96% at 92% -22%, rgba(45,212,191,.34), transparent 58%),
+          linear-gradient(155deg, #0b262a 0%, #0d3d3b 54%, #0f5f59 100%);
+        color: #fff;
       }
-      .head h1 {
-        font-size: clamp(20px, 5.4vw, 26px); color: var(--ink);
-        margin: clamp(12px, 3vw, 16px) 0 8px; line-height: 1.3;
+      .hero::before {
+        content: ''; position: absolute; right: -34px; top: -56px;
+        width: 156px; height: 156px; border-radius: 50%;
+        border: 1px solid rgba(153,246,228,.16);
+        background: radial-gradient(circle at 36% 32%, rgba(94,234,212,.18), transparent 68%);
+        pointer-events: none;
       }
-      .head h1 span { color: var(--brand); }
-      .head .note {
-        font-size: clamp(12.5px, 3.4vw, 14px); color: var(--muted);
-        line-height: 1.65; max-width: 30em; margin: 0 auto;
+      .hero::after {
+        content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 1px;
+        background: linear-gradient(90deg, transparent, rgba(255,255,255,.3), transparent);
+        pointer-events: none;
       }
-      .free-tag {
-        margin-top: clamp(12px, 3vw, 16px);
-        display: flex; justify-content: center; gap: clamp(10px, 3vw, 18px);
-        flex-wrap: wrap;
-        font-size: clamp(11.5px, 3.1vw, 13px); color: #0f766e; font-weight: 600;
+      .hero-mark {
+        position: absolute; right: -2px; bottom: -30px;
+        font-size: 104px; line-height: 1; font-weight: 800; letter-spacing: -.07em;
+        color: rgba(255,255,255,.045); pointer-events: none; user-select: none;
       }
-      .free-tag span { display: inline-flex; align-items: center; gap: 4px; }
+      .hero-top { position: relative; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+      .kicker {
+        display: inline-flex; align-items: center; gap: 8px;
+        font-size: 11px; font-weight: 700; letter-spacing: .08em;
+        color: rgba(153,246,228,.9);
+      }
+      .kicker::before { content: ''; width: 14px; height: 1.5px; border-radius: 2px; background: #5eead4; }
+      .live {
+        display: inline-flex; align-items: center; gap: 6px; white-space: nowrap;
+        padding: 4px 9px 4px 8px; border-radius: 999px;
+        border: 1px solid rgba(153,246,228,.26); background: rgba(255,255,255,.09);
+        font-size: 10.5px; font-weight: 600; color: #ccfbf1;
+      }
+      .live i { width: 5px; height: 5px; border-radius: 50%; background: #34d399; box-shadow: 0 0 0 3px rgba(52,211,153,.2); }
+      .plate {
+        position: relative; width: fit-content; min-width: 172px; max-width: 90%;
+        margin: 12px auto 0; padding: 11px 28px 12px;
+        border-radius: 14px;
+        border: 1px solid rgba(153,246,228,.3);
+        background: linear-gradient(180deg, rgba(255,255,255,.11), rgba(255,255,255,.035));
+        box-shadow: inset 0 1px 0 rgba(255,255,255,.18), 0 10px 26px rgba(2,32,30,.3);
+        text-align: center;
+      }
+      .plate-no {
+        display: block;
+        font-size: 32px; line-height: 1.1; font-weight: 800; letter-spacing: -.03em;
+        color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+        font-variant-numeric: tabular-nums;
+        text-shadow: 0 2px 18px rgba(2,32,30,.5);
+      }
+      .hero h1 { position: relative; margin: 12px 0 4px; text-align: center; font-size: 19px; line-height: 1.3; font-weight: 700; letter-spacing: -.01em; color: #f0fdfa; }
+      .hero h1.lg { margin-top: 14px; font-size: 22px; }
+      .hero .note { position: relative; max-width: 92%; margin: 0 auto; text-align: center; font-size: 11.5px; line-height: 1.55; color: rgba(204,251,241,.62); display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
 
-      .field { padding: clamp(15px, 3.8vw, 20px) clamp(16px, 4vw, 22px); }
-      .field + .field { border-top: 1px solid var(--line); }
-      .label {
-        display: flex; align-items: baseline; justify-content: space-between; gap: 10px;
-        font-size: clamp(13.5px, 3.6vw, 15px); font-weight: 700; color: #334155;
-        margin-bottom: clamp(10px, 2.6vw, 13px);
-      }
-      .label .req { color: #ef4444; font-weight: 700; margin-left: 2px; }
-      .label .sub { font-size: clamp(11px, 2.9vw, 12px); color: #a0aec0; font-weight: 500; }
+      .form { padding: 12px 16px 14px; }
+      .row + .row { margin-top: var(--g); }
+      .label { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 7px; font-size: 12.5px; font-weight: 700; color: #334155; letter-spacing: .01em; }
+      .label .req { margin-left: 4px; padding: 1px 5px; border-radius: 5px; background: var(--soft); color: var(--brand); font-size: 10px; font-weight: 700; }
+      .label .opt { margin-left: 4px; color: #aab6c2; font-size: 10.5px; font-weight: 500; }
+      .label .sub { font-size: 11px; font-weight: 500; color: #a6b2be; }
 
-      .chips { display: flex; flex-wrap: wrap; gap: clamp(7px, 2vw, 10px); }
+      .chips { display: flex; gap: 6px; }
+      #durChips { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); }
+      #reasonChips {
+        overflow-x: auto; scrollbar-width: none; -webkit-overflow-scrolling: touch; padding-bottom: 2px;
+        -webkit-mask-image: linear-gradient(to right, #000 0, #000 90%, transparent 100%);
+        mask-image: linear-gradient(to right, #000 0, #000 90%, transparent 100%);
+      }
+      #reasonChips::-webkit-scrollbar { display: none; }
       .chip {
-        flex: 1 1 calc(50% - 10px);
-        min-height: 46px;
-        display: flex; align-items: center; justify-content: center; gap: 6px;
-        border: 1.5px solid #dfe7f3; background: #f8fafc;
-        color: #475569; border-radius: 14px;
-        font-size: clamp(13.5px, 3.6vw, 15px); font-weight: 600;
-        font-family: inherit; cursor: pointer;
-        transition: all .16s ease;
+        min-width: 0; height: 36px; padding: 0 4px;
+        display: flex; align-items: center; justify-content: center;
+        border: 1px solid #e6ecf1; background: #f7f9fb; color: #5c6d7e;
+        border-radius: 10px; font-family: inherit; font-size: 11.5px; font-weight: 600;
+        letter-spacing: -.02em; white-space: nowrap; cursor: pointer;
+        transition: background .16s, color .16s, border-color .16s, box-shadow .16s, transform .16s;
       }
-      .chip:active { transform: scale(.97); }
-      .chip.on {
-        border-color: var(--brand); background: linear-gradient(135deg, #eef2ff, #e0f2fe);
-        color: #3730a3; box-shadow: 0 4px 14px rgba(79,70,229,.16);
-      }
-      .chip.sm { flex: 1 1 auto; padding: 0 14px; min-height: 42px; font-size: clamp(13px, 3.5vw, 14px); }
+      #reasonChips .chip { flex: 0 0 auto; height: 32px; padding: 0 12px; font-size: 12px; border-radius: 9px; }
+      .chip:active { transform: scale(.96); }
+      .chip.on { background: var(--brand); border-color: var(--brand); color: #fff; box-shadow: 0 4px 12px rgba(15,118,110,.24); }
 
-      .custom-row { margin-top: clamp(8px, 2.2vw, 11px); display: none; gap: 8px; }
+      .input {
+        display: block; width: 100%; height: 40px; padding: 0 12px;
+        border: 1px solid #e6ecf1; background: #f7f9fb; border-radius: 10px;
+        color: var(--ink); font-family: inherit; font-size: 16px; outline: none;
+        -webkit-appearance: none; appearance: none;
+        transition: border-color .16s, box-shadow .16s, background .16s;
+      }
+      .input::placeholder { color: #aab6c2; font-size: 13px; }
+      .input:focus { border-color: #14b8a6; background: #fff; box-shadow: 0 0 0 3px rgba(20,184,166,.13); }
+      .input.err { border-color: #f87171; background: #fff6f6; box-shadow: 0 0 0 3px rgba(248,113,113,.12); }
+      textarea.input { height: 42px; min-height: 42px; padding: 9px 12px; line-height: 1.35; resize: none; }
+
+      .custom-row { display: none; gap: 6px; margin-top: 8px; }
       .custom-row.show { display: flex; }
-      .custom-row input {
-        flex: 1; min-width: 0;
-        height: 46px; padding: 0 14px;
-        border: 1.5px solid #dfe7f3; border-radius: 13px;
-        background: #fff; color: var(--ink);
-        font-size: 16px; font-family: inherit; outline: none;
-        -webkit-appearance: none;
-      }
-      .custom-row input:focus { border-color: #a5b4fc; }
-      .unit {
-        display: flex; align-items: center; gap: 0;
-        border: 1.5px solid #dfe7f3; border-radius: 13px; overflow: hidden;
-        flex-shrink: 0;
-      }
-      .unit button {
-        height: 43px; padding: 0 14px; border: none; background: #f8fafc;
-        color: #64748b; font-size: 14px; font-weight: 700; font-family: inherit;
-      }
-      .unit button.on { background: #eef2ff; color: #4338ca; }
+      .custom-row .input { flex: 1; min-width: 0; }
+      .unit { display: flex; flex-shrink: 0; border: 1px solid #e6ecf1; background: #f7f9fb; border-radius: 10px; overflow: hidden; }
+      .unit button { height: 38px; padding: 0 11px; border: none; background: transparent; color: #7b8b9b; font-family: inherit; font-size: 12px; font-weight: 700; cursor: pointer; }
+      .unit button.on { background: var(--brand); color: #fff; }
 
-      .text-input, .note-input {
-        width: 100%; border: 1.5px solid #dfe7f3; border-radius: 13px;
-        background: #fff; color: var(--ink); font-family: inherit; outline: none;
-        -webkit-appearance: none;
-      }
-      .text-input { height: 48px; padding: 0 14px; font-size: 16px; }
-      .text-input:focus { border-color: #a5b4fc; }
-      .note-input {
-        padding: 12px 14px; font-size: 15px; line-height: 1.5;
-        min-height: 72px; resize: none;
-      }
-      .note-input:focus { border-color: #a5b4fc; }
-      .text-input.err, .custom-row input.err { border-color: #fca5a5; background: #fef2f2; }
+      .pair { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 10px; }
+      .pair > div { min-width: 0; }
+      .pair .label { margin-bottom: 6px; }
 
-      .submit {
-        margin-top: clamp(4px, 1.5vw, 8px);
-        background: linear-gradient(135deg, #4f46e5 0%, #0ea5e9 100%);
-        color: #fff; border: none; width: 100%;
-        padding: clamp(16px, 4vw, 20px);
-        border-radius: clamp(16px, 4vw, 20px);
-        font-size: clamp(16px, 4.2vw, 18px); font-weight: 700; font-family: inherit;
-        box-shadow: 0 12px 30px rgba(37, 99, 235, .4);
-        display: flex; align-items: center; justify-content: center; gap: 9px;
-        min-height: 56px; cursor: pointer; transition: all .18s;
+      .extra-toggle {
+        width: 100%; height: 30px; display: flex; align-items: center; justify-content: space-between;
+        border: 1px dashed #dfe7ee; background: #fbfcfd; border-radius: 9px; padding: 0 11px;
+        color: #6b7c8d; font-family: inherit; font-size: 11.5px; font-weight: 600; cursor: pointer;
       }
-      .submit:active { transform: scale(.985); }
-      .submit:disabled { background: linear-gradient(135deg, #94a3b8, #64748b); box-shadow: none; cursor: not-allowed; }
+      .extra-toggle span { color: #aab6c2; font-size: 10.5px; font-weight: 500; }
+      #extraBox { display: none; margin-top: 9px; }
+      #extraBox.show { display: block; }
+      #extraBox .mini-label { margin: 9px 0 5px 2px; font-size: 10.5px; color: #a6b2be; font-weight: 600; }
+      #extraBox .mini-label:first-child { margin-top: 0; }
 
-      .foot-note {
-        text-align: center; font-size: clamp(11.5px, 3.1vw, 13px);
-        color: rgba(255,255,255,.9); line-height: 1.7;
-        text-shadow: 0 1px 4px rgba(12, 30, 70, .3); padding: 0 10px;
-      }
-
-      .occupy-tip {
-        display: none;
-        background: #fffbeb; border: 1px solid #fde68a; color: #92400e;
-        border-radius: 14px; padding: 12px 14px;
-        font-size: clamp(12.5px, 3.4vw, 13.5px); line-height: 1.6;
-      }
+      .occupy-tip { display: none; margin-top: 10px; padding: 9px 11px; border: 1px solid #fde68a; background: #fffbeb; border-radius: 10px; color: #92400e; font-size: 11.5px; line-height: 1.55; }
       .occupy-tip.show { display: block; }
       .occupy-tip b { font-weight: 700; }
-      .occupy-tip button {
-        margin-top: 10px; width: 100%;
-        border: 1px solid #fbbf24; background: #fff; color: #92400e;
-        border-radius: 11px; padding: 10px; font-size: 13.5px; font-weight: 700;
-        font-family: inherit; min-height: 44px;
-      }
+      .occupy-tip button { width: 100%; margin-top: 8px; min-height: 34px; border: 1px solid #fbbf24; background: #fff; color: #92400e; border-radius: 9px; font-family: inherit; font-size: 12px; font-weight: 700; cursor: pointer; }
 
-      /* 结果视图 */
-      #resultView { display: none; }
-      .status-card { padding: clamp(22px, 5.5vw, 30px) clamp(18px, 4.5vw, 26px); text-align: center; }
+      .submit {
+        width: 100%; height: 48px; margin-top: 12px;
+        display: flex; align-items: center; justify-content: center; gap: 8px;
+        border: none; border-radius: 13px;
+        background: linear-gradient(135deg, #0f766e 0%, #0d9488 58%, #0ea5a9 100%);
+        color: #fff; font-family: inherit; font-size: 15px; font-weight: 700; letter-spacing: .02em;
+        box-shadow: 0 10px 24px rgba(13,148,136,.32);
+        cursor: pointer; transition: transform .16s, box-shadow .16s, filter .16s;
+      }
+      .submit::after { content: '→'; font-size: 16px; font-weight: 500; opacity: .9; }
+      .submit:hover { filter: brightness(1.06); }
+      .submit:active { transform: scale(.985); }
+      .submit:disabled { background: #94a3b8; box-shadow: none; filter: none; }
+      .foot { text-align: center; padding: 0 4px; font-size: 11px; line-height: 1.5; color: rgba(255,255,255,.6); }
+      .foot b { color: rgba(255,255,255,.88); font-weight: 600; }
+
+      .status-card { padding: 16px; text-align: left; }
+      .status-head { display: flex; align-items: center; gap: 12px; }
       .status-icon {
-        width: clamp(64px, 16vw, 78px); height: clamp(64px, 16vw, 78px);
-        margin: 0 auto clamp(12px, 3vw, 16px);
-        border-radius: 50%; display: flex; align-items: center; justify-content: center;
-        font-size: clamp(30px, 8vw, 38px);
-        background: #eef2ff;
+        flex: 0 0 46px; width: 46px; height: 46px; margin: 0;
+        display: flex; align-items: center; justify-content: center;
+        border-radius: 14px; background: #eef2ff; font-size: 23px;
       }
-      .status-card h2 { font-size: clamp(19px, 5vw, 24px); color: var(--ink); margin-bottom: 8px; }
-      .status-card .desc {
-        font-size: clamp(13px, 3.5vw, 14.5px); color: var(--muted); line-height: 1.7;
-      }
-      .timer-box {
-        display: none;
-        margin-top: clamp(14px, 3.6vw, 18px);
-        background: linear-gradient(135deg, #ecfdf5, #d1fae5);
-        border: 1px solid #a7f3d0; border-radius: 16px;
-        padding: clamp(12px, 3.2vw, 16px);
-      }
-      .timer-box.show { display: block; }
-      .timer-box .t-label { font-size: clamp(11.5px, 3.1vw, 12.5px); color: #047857; font-weight: 600; }
-      .timer-box .t-value {
-        font-size: clamp(22px, 6.2vw, 28px); font-weight: 800; color: #065f46;
-        margin: 4px 0 2px; font-variant-numeric: tabular-nums;
-      }
-      .timer-box .t-range { font-size: clamp(11.5px, 3.1vw, 13px); color: #059669; }
-
+      .status-text { min-width: 0; }
+      .status-card h2 { margin-bottom: 3px; font-size: 18px; font-weight: 800; letter-spacing: -.02em; color: var(--ink); }
+      .status-card .desc { font-size: 12px; line-height: 1.5; color: var(--muted); }
+      .timer-box { display: none; margin-top: 12px; padding: 10px 12px; border: 1px solid #a7f3d0; border-radius: 12px; background: #ecfdf5; }
+      .timer-box.show { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+      .timer-box .t-label { font-size: 10.5px; color: #047857; font-weight: 700; }
+      .timer-box .t-value { font-size: 21px; font-weight: 800; color: #065f46; font-variant-numeric: tabular-nums; letter-spacing: -.02em; }
+      .timer-box .t-range { flex: 1 1 100%; font-size: 11px; color: #059669; }
       .status-card.s-approved .status-icon { background: #d1fae5; }
       .status-card.s-approved h2 { color: #065f46; }
       .status-card.s-declined .status-icon { background: #fff1f2; }
@@ -1298,148 +1298,165 @@ function renderApplyPage(url) {
       .status-card.s-ended .status-icon { background: #eff6ff; }
       .status-card.s-ended h2 { color: #1d4ed8; }
 
-      .info-list { display: flex; flex-direction: column; gap: 9px; margin-top: clamp(14px, 3.6vw, 18px); text-align: left; }
-      .info-row {
-        display: flex; align-items: center; justify-content: space-between; gap: 12px;
-        background: #f8fafc; border: 1px solid #eef2f7;
-        border-radius: 12px; padding: 10px 13px;
-        font-size: clamp(12.5px, 3.4vw, 13.5px);
-      }
-      .info-row .k { color: #94a3b8; font-weight: 600; flex-shrink: 0; }
-      .info-row .v { color: #334155; font-weight: 700; text-align: right; word-break: break-all; }
+      .info-list { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 6px; margin-top: 12px; }
+      .info-row { display: flex; flex-direction: column; gap: 2px; min-width: 0; padding: 8px 10px; border: 1px solid #eef2f6; background: #f7f9fb; border-radius: 10px; }
+      .info-row .k { font-size: 10px; color: #9aabba; font-weight: 600; }
+      .info-row .v { font-size: 12.5px; color: #334155; font-weight: 700; word-break: break-all; }
 
-      .bubbles { display: flex; flex-direction: column; gap: 8px; }
-      .bubble {
-        background: #eef2ff; border: 1px solid #c7d2fe; color: #3730a3;
-        border-radius: 14px 14px 14px 5px; padding: 10px 14px;
-        font-size: clamp(13.5px, 3.5vw, 14.5px); line-height: 1.55;
-        word-break: break-word; max-width: 94%; align-self: flex-start;
-        white-space: pre-wrap;
-      }
-      .bubble .bt { display: block; font-size: 10.5px; color: #818cf8; margin-top: 3px; }
+      .msg-card { padding: 12px 14px; }
+      .msg-card .label { margin-bottom: 8px; font-size: 12px; }
+      .bubbles { display: flex; flex-direction: column; gap: 6px; max-height: 96px; overflow-y: auto; }
+      .bubble { max-width: 96%; align-self: flex-start; padding: 8px 11px; border: 1px solid #c7d2fe; border-radius: 12px 12px 12px 4px; background: #eef2ff; color: #3730a3; font-size: 12.5px; line-height: 1.5; word-break: break-word; white-space: pre-wrap; }
+      .bubble .bt { display: block; margin-top: 3px; font-size: 10px; color: #818cf8; }
+      .empty { font-size: 12px; color: #aab6c2; }
 
+      .actions { display: flex; flex-wrap: wrap; gap: 8px; }
       .btn-ghost {
-        width: 100%; min-height: 50px;
-        border-radius: 15px; border: 1.5px solid #dfe7f3;
-        background: #fff; color: #475569;
-        font-size: clamp(14px, 3.8vw, 15.5px); font-weight: 700; font-family: inherit;
-        cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 8px;
+        flex: 1 1 calc(50% - 4px); min-height: 44px;
+        display: flex; align-items: center; justify-content: center; gap: 6px;
+        border: 1px solid rgba(255,255,255,.16); border-radius: 13px;
+        background: rgba(255,255,255,.1); color: #eaf3f5;
+        font-family: inherit; font-size: 12.5px; font-weight: 700; cursor: pointer;
+        -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px);
+        transition: background .16s, transform .16s;
       }
+      .btn-ghost:hover { background: rgba(255,255,255,.18); }
       .btn-ghost:active { transform: scale(.985); }
-      .btn-ghost.danger { border-color: #fecdd3; color: #be123c; background: #fff1f2; }
+      .btn-ghost.primary { flex: 1 1 100%; border-color: transparent; background: rgba(255,255,255,.94); color: #0f766e; }
       .btn-ghost[disabled] { opacity: .55; }
 
       .toast {
-        position: fixed; top: calc(18px + var(--sat)); left: 50%;
-        transform: translateX(-50%) translateY(-120px);
-        background: #0f172a; color: #fff;
-        padding: 12px 20px; border-radius: 14px;
-        font-size: clamp(13px, 3.5vw, 14.5px); font-weight: 600;
-        box-shadow: 0 12px 34px rgba(0,0,0,.3);
+        position: fixed; top: calc(16px + var(--sat)); left: 50%;
+        transform: translateX(-50%) translateY(-120%);
+        background: #0f172a; color: #fff; padding: 11px 18px;
+        border: 1px solid rgba(255,255,255,.12); border-radius: 12px;
+        font-size: 13px; font-weight: 600;
+        box-shadow: 0 12px 34px rgba(0,0,0,.35);
         opacity: 0; transition: all .35s cubic-bezier(.2,.9,.3,1.2);
-        z-index: 100; max-width: calc(100vw - 36px); text-align: center;
+        z-index: 100; max-width: calc(100vw - 32px); text-align: center;
       }
       .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 
-      @media (min-width: 760px) { body { align-items: center; } }
+      @media (max-height: 700px) {
+        :root { --g: 9px; }
+        .wrap { gap: 7px; }
+        .hero { padding: 13px 16px 15px; }
+        .plate { margin-top: 10px; padding: 10px 24px 11px; min-width: 156px; }
+        .plate-no { font-size: 29px; }
+        .hero h1 { margin: 9px 0 3px; font-size: 18px; }
+        .hero h1.lg { font-size: 21px; }
+        .hero-mark { font-size: 88px; bottom: -24px; }
+        .form { padding: 10px 15px 12px; }
+        .chip { height: 33px; }
+        #reasonChips .chip { height: 30px; }
+        .input { height: 38px; }
+        textarea.input { height: 40px; min-height: 40px; }
+        .submit { height: 44px; margin-top: 10px; }
+        .status-card { padding: 13px; }
+      }
+      @media (max-width: 350px) {
+        .live { display: none; }
+        .chip { font-size: 11px; }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .card { animation: none; }
+        .chip, .input, .submit, .btn-ghost, .toast { transition: none; }
+      }
     </style>
   </head>
   <body>
     <div id="toast" class="toast"></div>
 
     <div class="wrap" id="formView">
-      <div class="card head">
-        <div class="badge">🅿️ ${escapeHtml(name)}</div>
-        <h1>想临时停一下？<br><span>跟车主说一声就行</span></h1>
-        <p class="note">${escapeHtml(note)}</p>
-        <div class="free-tag">
-          <span>⏱ 临时占用</span>
-          <span>📞 留个电话</span>
-          <span>🤝 到点挪车</span>
-        </div>
-      </div>
-
       <div class="card">
-        <div class="field">
-          <div class="label"><span>占用多久<span class="req">*</span></span><span class="sub">到点请挪车</span></div>
-          <div class="chips" id="durChips"></div>
-          <div class="custom-row" id="customRow">
-            <input id="customMin" type="number" inputmode="numeric" min="15" max="480" placeholder="填个数字">
-            <div class="unit">
-              <button type="button" id="unitMin" class="on" onclick="setUnit('min')">分钟</button>
-              <button type="button" id="unitHour" onclick="setUnit('hour')">小时</button>
+        <div class="hero">
+          <span class="hero-mark" aria-hidden="true">P</span>
+          <div class="hero-top">
+            <span class="kicker">私家车位</span>
+            <span class="live"><i></i>可临时借用</span>
+          </div>
+          ${spotNo ? '<div class="plate" title="' + escapeHtml(spotNo) + '"><span class="plate-no">' + escapeHtml(spotNo) + '</span></div>' : ''}
+          <h1${spotNo ? '' : ' class="lg"'}>想临时停一下？</h1>
+          <p class="note" title="${escapeHtml(note)}">跟车主说一声就行 · ${escapeHtml(note)}</p>
+        </div>
+
+        <div class="form">
+          <section class="row">
+            <div class="label"><span>占用时长<span class="req">必填</span></span><span class="sub">到点请挪车</span></div>
+            <div class="chips" id="durChips"></div>
+            <div class="custom-row" id="customRow">
+              <input id="customMin" class="input" type="number" inputmode="numeric" min="15" max="480" placeholder="填个数字">
+              <div class="unit">
+                <button type="button" id="unitMin" class="on" onclick="setUnit('min')">分钟</button>
+                <button type="button" id="unitHour" onclick="setUnit('hour')">小时</button>
+              </div>
             </div>
+          </section>
+
+          <section class="row">
+            <div class="label"><span>占用原因<span class="req">必填</span></span><span class="sub">左右滑动选更多</span></div>
+            <div class="chips" id="reasonChips"></div>
+          </section>
+
+          <section class="row pair">
+            <div>
+              <div class="label"><span>车牌号<span class="opt">选填</span></span></div>
+              <input id="plateInput" class="input" type="text" maxlength="10" placeholder="粤A12345" autocomplete="off">
+            </div>
+            <div>
+              <div class="label"><span>联系电话<span class="req">必填</span></span></div>
+              <input id="phoneInput" class="input" type="tel" inputmode="numeric" maxlength="11" placeholder="11 位手机号" autocomplete="tel">
+            </div>
+          </section>
+
+          <section class="row">
+            <button type="button" class="extra-toggle" id="extraToggle" onclick="toggleExtra()">＋ 补充说明<span>选填</span></button>
+            <div id="extraBox">
+              <div class="mini-label">占用原因（自己写一句）</div>
+              <input id="reasonInput" class="input" type="text" maxlength="40" placeholder="例如：上楼取个东西">
+              <div class="mini-label">给车主的话</div>
+              <textarea id="noteInput" class="input" maxlength="120" placeholder="例如：只停 40 分钟，接孩子就走"></textarea>
+            </div>
+          </section>
+
+          <div id="occupyTip" class="occupy-tip">
+            <b id="occupyText">车位正在被占用</b>
+            <button type="button" onclick="submitApply(true)">仍然提交申请（排队）</button>
           </div>
-        </div>
 
-        <div class="field">
-          <div class="label"><span>占用原因<span class="req">*</span></span><span class="sub">选一个或自己写</span></div>
-          <div class="chips" id="reasonChips"></div>
-          <div style="margin-top:10px">
-            <input id="reasonInput" class="text-input" type="text" maxlength="40" placeholder="补充说明，例如：上楼取个东西">
-          </div>
-        </div>
-
-        <div class="field">
-          <div class="label"><span>车牌号<span class="sub">（可选）</span></span><span class="sub">方便车主核对</span></div>
-          <input id="plateInput" class="text-input" type="text" maxlength="10" placeholder="例如：粤A12345" autocomplete="off">
-        </div>
-
-        <div class="field">
-          <div class="label"><span>联系电话<span class="req">*</span></span><span class="sub">仅车主可见</span></div>
-          <input id="phoneInput" class="text-input" type="tel" inputmode="numeric" maxlength="11" placeholder="11 位手机号" autocomplete="tel">
-        </div>
-
-        <div class="field">
-          <div class="label"><span>更多说明<span class="sub">（可选）</span></span></div>
-          <textarea id="noteInput" class="note-input" maxlength="120" placeholder="例如：只停 40 分钟，接孩子就走"></textarea>
+          <button id="submitBtn" class="submit" onclick="submitApply(false)"><span>发送借用申请</span></button>
         </div>
       </div>
 
-      <div id="occupyTip" class="occupy-tip">
-        <b id="occupyText">车位正在被占用</b>
-        <button type="button" onclick="submitApply(true)">仍然提交申请（排队）</button>
-      </div>
-
-      <button id="submitBtn" class="submit" onclick="submitApply(false)">
-        <span>📨</span><span>发送借用申请</span>
-      </button>
-
-      <p class="foot-note">提交后请停留本页，车主同意会实时显示<br>离开后重新扫码也能继续查看</p>
+      <p class="foot"><b>手机号仅车主可见</b> · 提交后停留本页，结果会实时显示</p>
     </div>
 
     <div class="wrap" id="resultView">
       <div class="card status-card" id="statusCard">
-        <div class="status-icon" id="statusIcon">⏳</div>
-        <h2 id="statusTitle">申请已发出</h2>
-        <p class="desc" id="statusDesc">正在等车主确认…</p>
-
+        <div class="status-head">
+          <div class="status-icon" id="statusIcon">⏳</div>
+          <div class="status-text">
+            <h2 id="statusTitle">申请已发出</h2>
+            <p class="desc" id="statusDesc">正在等车主确认…</p>
+          </div>
+        </div>
         <div class="timer-box" id="timerBox">
           <div class="t-label">剩余可用时间</div>
           <div class="t-value" id="timerValue">--:--</div>
           <div class="t-range" id="timerRange"></div>
         </div>
-
         <div class="info-list" id="infoList"></div>
       </div>
 
-      <div class="card" style="padding:clamp(15px,3.8vw,20px) clamp(16px,4vw,22px)">
-        <div class="label" style="margin-bottom:12px"><span>💬 车主回复</span></div>
-        <div class="bubbles" id="bubbleList">
-          <div style="font-size:13.5px;color:#94a3b8">还没有回复，稍等一下下…</div>
-        </div>
+      <div class="card msg-card">
+        <div class="label"><span>💬 车主回复</span><span class="sub">实时更新</span></div>
+        <div class="bubbles" id="bubbleList"><div class="empty">还没有回复，稍等一下…</div></div>
       </div>
 
-      <div style="display:flex;flex-direction:column;gap:10px">
-        <button class="btn-ghost" id="releaseBtn" onclick="releaseSpot()">
-          <span>🚗</span><span>我已驶离，释放车位</span>
-        </button>
-        <button class="btn-ghost" id="callBtn" onclick="callOwner()" style="display:none">
-          <span>📞</span><span>联系车主</span>
-        </button>
-        <button class="btn-ghost" id="againBtn" onclick="location.href=location.pathname+'?spot='+encodeURIComponent(SPOT)+'&new=1'">
-          <span>🔄</span><span>重新申请</span>
-        </button>
+      <div class="actions">
+        <button class="btn-ghost primary" id="releaseBtn" onclick="releaseSpot()"><span>我已驶离 · 释放车位</span></button>
+        <button class="btn-ghost" id="callBtn" onclick="callOwner()" style="display:none"><span>📞 联系车主</span></button>
+        <button class="btn-ghost" id="againBtn" onclick="location.href=location.pathname+'?spot='+encodeURIComponent(SPOT)+'&new=1'"><span>🔄 重新申请</span></button>
       </div>
     </div>
 
@@ -1484,6 +1501,14 @@ function renderApplyPage(url) {
         return h + ' 小时 ' + r + ' 分钟';
       }
 
+      function toggleExtra() {
+        var box = document.getElementById('extraBox');
+        var btn = document.getElementById('extraToggle');
+        var open = box.classList.toggle('show');
+        btn.firstChild.nodeValue = open ? '－ 补充说明' : '＋ 补充说明';
+        if (open) document.getElementById('reasonInput').focus();
+      }
+
       function buildChips() {
         var box = document.getElementById('durChips');
         DURATIONS.forEach(function (m) {
@@ -1498,7 +1523,7 @@ function renderApplyPage(url) {
         custom.type = 'button';
         custom.className = 'chip';
         custom.id = 'customChip';
-        custom.textContent = '⏱ 自定义';
+        custom.textContent = '自定义';
         custom.onclick = function () {
           var row = document.getElementById('customRow');
           var open = row.classList.contains('show');
@@ -1581,7 +1606,7 @@ function renderApplyPage(url) {
         document.getElementById('phoneInput').classList.remove('err');
 
         btn.disabled = true;
-        btn.innerHTML = '<span>🚀</span><span>发送中…</span>';
+        btn.innerHTML = '<span>发送中…</span>';
 
         try {
           var res = await fetch('/api/apply', {
@@ -1613,7 +1638,7 @@ function renderApplyPage(url) {
           toast('❌ 网络异常，请重试');
         } finally {
           btn.disabled = false;
-          btn.innerHTML = '<span>📨</span><span>发送借用申请</span>';
+          btn.innerHTML = '<span>发送借用申请</span>';
         }
       }
 
@@ -1726,7 +1751,7 @@ function renderApplyPage(url) {
       function renderMessages(msgs) {
         var box = document.getElementById('bubbleList');
         if (!msgs || !msgs.length) {
-          box.innerHTML = '<div style="font-size:13.5px;color:#94a3b8">还没有回复，稍等一下下…</div>';
+          box.innerHTML = '<div class="empty">还没有回复，稍等一下…</div>';
           return;
         }
         var sig = msgs.map(function (m) { return m.ts + ':' + m.text; }).join('|');
@@ -1801,7 +1826,7 @@ function renderApplyPage(url) {
         if (!SID) return;
         var btn = document.getElementById('releaseBtn');
         btn.disabled = true;
-        btn.innerHTML = '<span>⏳</span><span>提交中…</span>';
+        btn.innerHTML = '<span>提交中…</span>';
         try {
           var res = await fetch('/api/release', {
             method: 'POST',
@@ -1820,7 +1845,7 @@ function renderApplyPage(url) {
           toast('❌ 网络异常');
         }
         btn.disabled = false;
-        btn.innerHTML = '<span>🚗</span><span>我已驶离，释放车位</span>';
+        btn.innerHTML = '<span>我已驶离 · 释放车位</span>';
       }
 
       var phoneCache = null;
@@ -1832,7 +1857,7 @@ function renderApplyPage(url) {
           var data = await res.json().catch(function () { return {}; });
           if (res.ok && data.tel) {
             phoneCache = data.tel;
-            document.getElementById('callBtn').innerHTML = '<span>📞</span><span>' + (data.mask || '拨打电话') + '</span>';
+            document.getElementById('callBtn').innerHTML = '<span>📞 ' + (data.mask || '拨打电话') + '</span>';
             location.href = 'tel:' + data.tel;
           } else {
             toast(data.error || '车主未留电话');
